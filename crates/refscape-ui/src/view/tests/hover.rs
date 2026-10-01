@@ -13,6 +13,7 @@ fn source_hover_is_debounced_and_uses_absolute_utf16_at_each_zoom(cx: &mut TestA
             cx,
         )
     });
+    cx.run_until_parked();
     let handle = cx.window_handle();
     for (zoom, offset) in [
         (1.0, Point::default()),
@@ -139,6 +140,7 @@ fn long_hover_documentation_scrolls_without_moving_the_canvas(cx: &mut TestAppCo
             cx,
         )
     });
+    cx.run_until_parked();
     let handle = cx.window_handle();
     cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
         .unwrap();
@@ -220,6 +222,7 @@ fn hover_cancels_when_zooming_and_never_requests_hidden_source(cx: &mut TestAppC
             cx,
         )
     });
+    cx.run_until_parked();
     let handle = cx.window_handle();
     cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
         .unwrap();

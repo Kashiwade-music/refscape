@@ -14,6 +14,8 @@ pub(super) struct Output {
     pub(super) error: bool,
     pub(super) opened_project: bool,
     pub(super) restore_session: Option<(PathBuf, PathBuf)>,
+    pub(super) prepared: Option<PreparedCanvasEdit>,
+    pub(super) can_undo: bool,
 }
 
 impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<L, R> {
@@ -26,7 +28,14 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             cx.notify();
             return;
         }
+        if self.canvas.drag.is_some() {
+            self.requests.status = "Finish dragging before starting another request.".into();
+            cx.notify();
+            return;
+        }
         self.requests.busy = true;
+        self.layout.backend_pending = true;
+        self.layout_activity(cx);
         self.clear_hover(cx);
         self.requests.error = false;
         self.requests.status = label.into();
@@ -38,19 +47,24 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             .iter()
             .map(|c| (c.id.clone(), c.position))
             .collect();
-        let positions_before_job = positions.clone();
+        let epoch = self.layout.session_epoch;
         let task = cx.background_executor().spawn(async move {
             let mut explorer = explorer
                 .lock()
                 .map_err(|_| "Explorer lock poisoned".to_string())?;
             explorer.sync_canvas(viewport, positions)?;
-            let result = job(&mut explorer);
+            let result = job(&mut explorer).map(|mut output| {
+                output.can_undo = explorer.can_undo_layout();
+                output
+            });
             Ok::<_, String>((result, explorer.session().clone()))
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
-                view.complete_job(result, &positions_before_job, cx);
+                if epoch == view.layout.session_epoch {
+                    view.complete_job(result, cx);
+                }
             });
         })
         .detach();
@@ -58,19 +72,28 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
     }
 
     /// Reconcile a completed request while retaining newer pointer and selection state.
-    fn complete_job(
+    pub(super) fn complete_job(
         &mut self,
         result: Result<(Result<Output, String>, Session), String>,
-        positions_before_job: &[(String, Point)],
         cx: &mut Context<Self>,
     ) {
+        self.layout.backend_pending = false;
         self.requests.busy = false;
         match result {
+            Ok((Ok(output), _)) if output.prepared.is_some() => {
+                self.requests.busy = true;
+                self.layout.pending_output = Some(output);
+                self.resume_canvas_edit(cx);
+            }
             Ok((Ok(output), mut session)) => {
                 if !output.reset {
-                    self.retain_interactive_canvas(&mut session, Some(positions_before_job));
+                    session.viewport = self.session.viewport;
                 }
                 self.session = session;
+                self.layout.can_undo = output.can_undo;
+                if output.reset {
+                    self.reset_canvas_layout();
+                }
                 if let Some((generation, inspection)) = output.inspection
                     && generation == self.canvas.selection_generation
                 {
@@ -97,6 +120,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                     self.search.marked = None;
                     self.canvas.selected = None;
                     self.canvas.drag = None;
+                    self.canvas.drag_preview = None;
                 }
                 self.requests.status = output.message.unwrap_or_else(|| {
                     format!(
@@ -110,18 +134,13 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                     self.project.pending = None;
                     self.project.launch_options = ProjectOptions::default();
                 }
-                self.arrange_canvas();
+                self.reconcile_canvas_selection();
                 if let Some((root, path)) = output.restore_session {
                     self.project.pending = Some((root.clone(), path.clone()));
                     self.restore_session(root, path, cx);
                 }
             }
-            Ok((Err(error), mut session)) => {
-                if session.project_root == self.session.project_root {
-                    self.retain_interactive_canvas(&mut session, None);
-                }
-                self.session = session;
-                self.arrange_canvas();
+            Ok((Err(error), _)) => {
                 self.requests.status = error;
                 self.requests.error = true;
             }
@@ -130,37 +149,18 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                 self.requests.error = true;
             }
         }
+        if !self.requests.busy {
+            self.resume_canvas_edit(cx);
+        }
         cx.notify();
     }
 
-    /// Keep pointer changes made while the backend worked. Failures preserve every position;
-    /// successful navigation preserves only positions the user changed after dispatch.
-    fn retain_interactive_canvas(
-        &self,
-        session: &mut Session,
-        positions_before_job: Option<&[(String, Point)]>,
-    ) {
-        session.viewport = self.session.viewport;
-        for card in &mut session.cards {
-            let Some(current) = self
-                .session
-                .cards
-                .iter()
-                .find(|current| current.id == card.id)
-            else {
-                continue;
-            };
-            if positions_before_job.is_none_or(|positions| {
-                positions
-                    .iter()
-                    .any(|(id, position)| id == &card.id && *position != current.position)
-            }) {
-                card.position = current.position;
-            }
-        }
-    }
-
     pub(super) fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.canvas.drag.is_some() || self.layout.pending_drop.is_some() {
+            self.requests.status = "Finish moving the canvas before closing.".into();
+            cx.notify();
+            return false;
+        }
         if self.requests.busy {
             self.requests.status = "A request is running. Close again after it finishes so the complete session can be saved.".into();
             cx.notify();
@@ -173,6 +173,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             return false;
         }
         self.requests.closing = true;
+        self.layout_activity(cx);
         self.clear_hover(cx);
         self.requests.status = "Saving session before closing…".into();
         self.requests.error = false;

@@ -7,7 +7,7 @@ use refscape_model::{
 
 use crate::{
     graph::descendant_cards,
-    layout::{arrange_cards, compact_cards},
+    layout::{LayoutRules, plan_restore_repair, plan_tree_arrangement},
     regions::build_regions,
 };
 
@@ -51,19 +51,20 @@ fn invalid_later_card_does_not_apply_earlier_reflow() {
     ];
     cards[2].width = f32::MAX;
     let before = cards.clone();
-    assert!(arrange_cards(&mut cards).is_err());
+    assert!(plan_restore_repair(&cards, LayoutRules::default()).is_err());
     assert_eq!(cards, before);
 }
 
 #[test]
-fn failed_compaction_does_not_apply_any_placements() {
+fn failed_tree_arrangement_does_not_apply_any_placements() {
     let mut cards = vec![
         card("first", Point::new(100.0, 300.0)),
         card("second", Point::new(800.0, 500.0)),
     ];
     cards[1].width = f32::MAX;
+    cards[1].position.x = f32::MAX;
     let before = cards.clone();
-    assert!(compact_cards(&mut cards, Point::new(f32::MAX, 0.0), &[]).is_err());
+    assert!(plan_tree_arrangement(&cards, &[], None, LayoutRules::default()).is_err());
     assert_eq!(cards, before);
 }
 

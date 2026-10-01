@@ -350,6 +350,7 @@ fn launch_settings_survive_first_folder_picker_and_clear_after_opening(cx: &mut 
             cx,
         )
     });
+    cx.run_until_parked();
     view.update(cx, |view, cx| {
         view.open_project_with_session(project.0.clone(), project.0.join("session.json"), cx)
     });

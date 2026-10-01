@@ -3,6 +3,7 @@ mod background;
 mod hover;
 mod input;
 mod interaction;
+mod layout;
 mod navigation;
 mod painting;
 mod project;
@@ -24,7 +25,10 @@ use gpui::{
     px, quad, rgb, size,
 };
 use refscape_application::{
-    explorer::{Explorer, VariableInspection},
+    explorer::{
+        Explorer, PreparedCanvasCommit, PreparedCanvasEdit, PreparedLayoutCommit,
+        VariableInspection,
+    },
     ports::{LanguageService, SessionRepository},
 };
 use refscape_model::{
@@ -37,8 +41,6 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
-
-use refscape_canvas::layout::arrange_cards;
 
 const HEADER: f32 = CODE_CARD_HEADER;
 const LINE: f32 = CODE_LINE_HEIGHT;
@@ -53,6 +55,7 @@ pub(crate) struct ExplorerView<L: LanguageService + 'static, R: SessionRepositor
     pub(crate) canvas: CanvasState,
     hover: HoverState,
     requests: RequestState,
+    layout: layout::LayoutState,
 }
 
 struct ProjectState {
@@ -84,6 +87,7 @@ pub(crate) struct CanvasState {
     selection_generation: u64,
     bounds: Bounds<Pixels>,
     context_hover: Option<(String, usize)>,
+    drag_preview: Option<(String, Point)>,
 }
 
 #[derive(Default)]
@@ -115,8 +119,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut session = explorer.session().clone();
-        let layout_error = arrange_cards(&mut session.cards).err();
+        let session = explorer.session().clone();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mut themes = vec![Theme::dark(), Theme::light()];
@@ -145,11 +148,8 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                 status: "Open a project to start exploring.".into(),
                 ..Default::default()
             },
+            layout: layout::LayoutState::default(),
         };
-        if let Some(error) = layout_error {
-            view.requests.status = error;
-            view.requests.error = true;
-        }
         let weak = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             weak.update(cx, |view, cx| view.close(window, cx))

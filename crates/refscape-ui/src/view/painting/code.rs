@@ -48,6 +48,10 @@ pub(super) fn paint_code(
                 run.color = color(&palette.muted);
             }
         }
+        let world_code =
+            window
+                .text_system()
+                .shape_line(source.text.to_string().into(), px(12.0), &runs, None);
         let code = window.text_system().shape_line(
             source.text.into_owned().into(),
             px(12.0 * zoom),
@@ -79,6 +83,7 @@ pub(super) fn paint_code(
         });
         let row = PaintedRow {
             code,
+            world_code,
             position: source.position,
             fold: source.fold,
             number,

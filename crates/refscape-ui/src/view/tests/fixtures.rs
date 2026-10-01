@@ -108,6 +108,9 @@ pub(super) fn source_fixture(
         Repository,
     );
     explorer
+        .open_project(Path::new("."), &ProjectOptions::default())
+        .unwrap();
+    explorer
         .add_symbol(symbol, Point::new(100.0, 50.0))
         .unwrap();
     (explorer, requests)
@@ -167,6 +170,9 @@ pub(super) fn variable_fixture(
         },
         Repository,
     );
+    explorer
+        .open_project(Path::new("."), &ProjectOptions::default())
+        .unwrap();
     explorer
         .add_symbol(symbol, Point::new(100.0, 50.0))
         .unwrap();

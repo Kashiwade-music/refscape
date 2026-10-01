@@ -96,31 +96,34 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
         self.toggle_expansion(card_id, position, ConnectionKind::Reference)
     }
 
+    /// Compatibility anchor for nonvisual callers; UI supplies measured word geometry.
+    fn estimated_anchor(&self, card_id: &str, position: Position) -> Result<Point> {
+        let card = self
+            .session
+            .cards
+            .iter()
+            .find(|card| card.id == card_id)
+            .ok_or_else(|| format!("Unknown card {card_id}"))?;
+        Ok(Point::new(
+            card.width,
+            source_anchor_y(card, position) - card.position.y,
+        ))
+    }
+
     fn toggle_expansion(
         &mut self,
         card_id: &str,
         position: Position,
         kind: ConnectionKind,
     ) -> Result<Option<Vec<String>>> {
-        let mut targets: Vec<_> = self
-            .session
-            .connections
-            .iter()
-            .filter(|edge| edge.from == card_id && edge.source == position && edge.kind == kind)
-            .map(|edge| edge.to.clone())
-            .collect();
-        if targets.is_empty() {
-            return self.expand(card_id, position, kind).map(Some);
-        }
-        targets.sort();
-        targets.dedup();
-        // Hide a group in one layout pass, while keeping the clicked source card.
-        targets.retain(|target| target != card_id);
-        self.remove_cards(&targets, &[card_id.into()])?;
-        self.session
-            .connections
-            .retain(|edge| !(edge.from == card_id && edge.source == position && edge.kind == kind));
-        Ok(None)
+        let anchor = self.estimated_anchor(card_id, position)?;
+        let edit = self.prepare_toggle_expansion(card_id, position, kind, anchor)?;
+        let outcome = self.commit_prepared(edit)?;
+        Ok(if outcome.expanded == Some(true) {
+            Some(outcome.targets)
+        } else {
+            None
+        })
     }
 
     pub fn expand_definition(&mut self, card_id: &str, position: Position) -> Result<Vec<String>> {
@@ -131,109 +134,25 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
         self.expand(card_id, position, ConnectionKind::Reference)
     }
 
+    /// Explicit world offset route for CLI/tests that know the symbol anchor.
+    pub fn expand_at(
+        &mut self,
+        card_id: &str,
+        position: Position,
+        kind: ConnectionKind,
+        anchor_offset: Point,
+    ) -> Result<Vec<String>> {
+        let edit = self.prepare_expansion(card_id, position, kind, anchor_offset)?;
+        Ok(self.commit_prepared(edit)?.targets)
+    }
+
     fn expand(
         &mut self,
         card_id: &str,
         position: Position,
         kind: ConnectionKind,
     ) -> Result<Vec<String>> {
-        let origin = self
-            .session
-            .cards
-            .iter()
-            .find(|c| c.id == card_id)
-            .cloned()
-            .ok_or_else(|| format!("Unknown card {card_id}"))?;
-        if !origin.source.contains_display_position(position) {
-            return Err("Requested source position is outside the card".into());
-        }
-        let symbols = match kind {
-            ConnectionKind::Definition => self
-                .language
-                .definitions(&origin.source.symbol.path, position)?,
-            ConnectionKind::TypeDefinition => self
-                .language
-                .type_definitions(&origin.source.symbol.path, position)?,
-            ConnectionKind::Reference => self
-                .language
-                .references(&origin.source.symbol.path, position)?,
-        };
-        // Resolve every source before changing the canvas, so a failed request
-        // cannot leave an incomplete expansion behind.
-        let mut sources = Vec::new();
-        for symbol in symbols {
-            symbol.validate()?;
-            let existing = self.card_for_symbol(&symbol).map(|c| c.source.clone());
-            let source = match existing {
-                Some(source) => source,
-                None => self.language.source(&symbol)?,
-            };
-            source.validate()?;
-            if !sources
-                .iter()
-                .any(|existing: &SourceDocument| same_symbol(&existing.symbol, &source.symbol))
-            {
-                sources.push(source);
-            }
-        }
-        let mut placements = Vec::new();
-        let mut occupied: Vec<_> = self.session.cards.iter().map(CardRect::from).collect();
-        let mut next_position = Point::new(
-            origin.position.x + origin.width + CARD_COLUMN_GAP,
-            source_anchor_y(&origin, position),
-        );
-        for source in sources {
-            let placement = match self.card_for_symbol(&source.symbol) {
-                Some(existing) => CardRect::from(existing),
-                None => {
-                    let (width, height) = source_dimensions(&source);
-                    let placement = vacant_position(next_position, width, height, &occupied)?;
-                    occupied.push(placement);
-                    next_position.y = placement.position.y + placement.height + CARD_GAP;
-                    placement
-                }
-            };
-            placements.push((source, placement));
-        }
-        let before = self.session.clone();
-        let mut ids = Vec::new();
-        for (source, placement) in placements {
-            let target = self.insert_source(source, placement);
-            if !ids.contains(&target) {
-                ids.push(target.clone());
-            }
-            if !self.session.connections.iter().any(|c| {
-                c.from == card_id && c.to == target && c.kind == kind && c.source == position
-            }) {
-                let mut number = self.session.connections.len();
-                let id = loop {
-                    let candidate = format!("connection:{number}");
-                    if !self
-                        .session
-                        .connections
-                        .iter()
-                        .any(|connection| connection.id == candidate)
-                    {
-                        break candidate;
-                    }
-                    number += 1;
-                };
-                self.session.connections.push(Connection {
-                    id,
-                    from: card_id.into(),
-                    to: target,
-                    kind,
-                    source: position,
-                });
-            }
-        }
-        if let Err(error) =
-            arrange_connected_cards(&mut self.session.cards, &self.session.connections)
-        {
-            self.session = before;
-            return Err(error);
-        }
-        self.rebuild_regions();
-        Ok(ids)
+        let anchor = self.estimated_anchor(card_id, position)?;
+        self.expand_at(card_id, position, kind, anchor)
     }
 }

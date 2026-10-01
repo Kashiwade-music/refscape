@@ -9,6 +9,7 @@ pub(super) enum Drag {
 impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<L, R> {
     pub(super) fn zoom(&mut self, factor: f32, anchor: Point, cx: &mut Context<Self>) {
         self.clear_hover(cx);
+        self.layout_activity(cx);
         let viewport = &mut self.session.viewport;
         let old = viewport.zoom;
         let zoom = (old * factor).clamp(0.15, 3.0);
@@ -21,6 +22,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
     }
     pub(super) fn fit(&mut self, cx: &mut Context<Self>) {
         self.clear_hover(cx);
+        self.layout_activity(cx);
         if self.session.cards.is_empty() {
             self.session.viewport = Default::default();
             cx.notify();
@@ -71,6 +73,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             return;
         }
         self.clear_hover(cx);
+        self.layout_activity(cx);
         self.search.focused = false;
         for card in self.canvas.painted.iter().rev() {
             if !card.bounds.contains(&event.position) {
@@ -80,9 +83,13 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             self.canvas.selected = Some(id.clone());
             let zoom = self.session.viewport.zoom;
             if f32::from(event.position.y - card.bounds.top()) < HEADER * zoom && !references {
+                if self.layout.planning {
+                    return;
+                }
                 if event.position.x > card.bounds.right() - px(28.0 * zoom) {
                     self.remove_selected(cx);
                 } else if let Some(source) = self.session.cards.iter().find(|c| c.id == id) {
+                    self.canvas.drag_preview = Some((id.clone(), source.position));
                     self.canvas.drag = Some(Drag::Card(id, event.position, source.position));
                 }
                 cx.notify();
@@ -108,12 +115,10 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                         "Expanding context…"
                     },
                     Box::new(move |explorer| {
-                        if collapse {
-                            explorer.collapse_context(&id, index)?;
-                        } else {
-                            explorer.expand_context(&id, index)?;
-                        }
-                        Ok(Output::default())
+                        Ok(Output {
+                            prepared: Some(explorer.prepare_context(&id, index, !collapse)?),
+                            ..Default::default()
+                        })
                     }),
                     cx,
                 );
@@ -167,6 +172,15 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                             .map(|edge| edge.source)
                     })
                     .unwrap_or(position);
+                let Some(anchor) = self
+                    .session
+                    .cards
+                    .iter()
+                    .find(|source| source.id == id)
+                    .and_then(|source| shaping::symbol_anchor_offset(source, card, position))
+                else {
+                    return;
+                };
                 self.clear_inspection();
                 let generation = self.canvas.selection_generation;
                 self.run_job(
@@ -183,35 +197,29 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                         } else {
                             None
                         };
-                        let found = if references {
-                            explorer.toggle_references(&id, position)
-                        } else if let Some(inspection) = &inspection {
-                            explorer.toggle_type_definition(&id, inspection.position)
-                        } else {
-                            explorer.toggle_definition(&id, position)
-                        };
-                        let found = match found {
-                            Ok(found) => found,
-                            Err(error) if inspection.is_some() => return Ok(Output {
-                                inspection: inspection.map(|inspection| (generation, inspection)),
-                                message: Some(format!("Variable highlighted; cannot expand its type: {error}")),
-                                error: true,
-                                ..Default::default()
-                            }),
+                        let prepared = explorer.prepare_toggle_expansion(
+                            &id,
+                            inspection.as_ref().map_or(position, |value| value.position),
+                            kind,
+                            anchor,
+                        );
+                        let prepared = match prepared {
+                            Ok(prepared) => prepared,
+                            Err(error) if inspection.is_some() => {
+                                return Ok(Output {
+                                    inspection: inspection
+                                        .map(|inspection| (generation, inspection)),
+                                    message: Some(format!(
+                                        "Variable highlighted; cannot expand its type: {error}"
+                                    )),
+                                    error: true,
+                                    ..Default::default()
+                                });
+                            }
                             Err(error) => return Err(error),
                         };
                         Ok(Output {
-                            message: if found.as_ref().is_some_and(Vec::is_empty) {
-                                Some(
-                                    if inspection.is_some() {
-                                        "Variable highlighted; this type has no source definition to expand.".into()
-                                    } else {
-                                        "rust-analyzer returned no locations for this position.".into()
-                                    },
-                                )
-                            } else {
-                                None
-                            },
+                            prepared: Some(prepared),
                             inspection: inspection.map(|inspection| (generation, inspection)),
                             ..Default::default()
                         })
@@ -270,13 +278,18 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                 *last = event.position;
             }
             Some(Drag::Card(id, start, origin)) => {
-                if let Some(card) = self.session.cards.iter_mut().find(|c| c.id == *id) {
-                    card.position = Point::new(
-                        origin.x
-                            + f32::from(event.position.x - start.x) / self.session.viewport.zoom,
-                        origin.y
-                            + f32::from(event.position.y - start.y) / self.session.viewport.zoom,
-                    );
+                if self.session.cards.iter().any(|c| c.id == *id) {
+                    self.canvas.drag_preview = Some((
+                        id.clone(),
+                        Point::new(
+                            origin.x
+                                + f32::from(event.position.x - start.x)
+                                    / self.session.viewport.zoom,
+                            origin.y
+                                + f32::from(event.position.y - start.y)
+                                    / self.session.viewport.zoom,
+                        ),
+                    ));
                 }
             }
             None => {
@@ -284,10 +297,11 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                 return;
             }
         }
+        self.layout_activity(cx);
         cx.notify();
     }
 
-    pub(super) fn arrange_canvas(&mut self) {
+    pub(super) fn reconcile_canvas_selection(&mut self) {
         if self
             .canvas
             .selected
@@ -299,17 +313,24 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         if matches!(&self.canvas.drag, Some(Drag::Card(id, ..)) if !self.session.cards.iter().any(|card| &card.id == id))
         {
             self.canvas.drag = None;
+            self.canvas.drag_preview = None;
         }
-        if let Err(error) = arrange_cards(&mut self.session.cards) {
-            self.requests.status = error;
-            self.requests.error = true;
+        if self
+            .layout
+            .pending_drop
+            .as_ref()
+            .is_some_and(|(id, _)| !self.session.cards.iter().any(|card| &card.id == id))
+        {
+            self.layout.pending_drop = None;
         }
     }
 
     pub(super) fn finish_drag(&mut self, cx: &mut Context<Self>) {
         if matches!(self.canvas.drag.take(), Some(Drag::Card(..))) {
-            self.arrange_canvas();
+            self.layout.pending_drop = self.canvas.drag_preview.take();
         }
+        self.layout_activity(cx);
+        self.resume_canvas_edit(cx);
         cx.notify();
     }
     pub(super) fn scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
@@ -317,6 +338,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             return;
         }
         self.clear_hover(cx);
+        self.layout_activity(cx);
         let (dx, dy) = match event.delta {
             ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
             ScrollDelta::Lines(p) => (p.x * 24.0, p.y * 24.0),
@@ -347,6 +369,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             return;
         }
         let key = event.keystroke.key.as_str();
+        self.layout_activity(cx);
         let modifiers = event.keystroke.modifiers;
         if modifiers.control || modifiers.platform {
             match key {
@@ -379,6 +402,8 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                 self.clear_inspection();
                 self.search.focused = false;
                 self.canvas.drag = None;
+                self.canvas.drag_preview = None;
+                self.resume_canvas_edit(cx);
                 cx.notify();
             }
             "enter" if self.search.focused => self.search(cx),

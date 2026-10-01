@@ -54,9 +54,25 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
                 card.position = position;
             }
         }
-        arrange_cards(&mut cards)?;
+        validate_layout(&cards, LayoutRules::default())?;
+        let mut candidate = self.session.clone();
+        candidate.cards = cards.clone();
+        candidate.viewport = viewport;
+        // The project picker starts with an intentionally empty, unopened session.
+        // Camera synchronization there must not require a project root yet.
+        if !candidate.project_root.as_os_str().is_empty()
+            || !candidate.cards.is_empty()
+            || !candidate.connections.is_empty()
+        {
+            candidate.validate()?;
+        }
+        let changed = cards != self.session.cards;
         self.session.viewport = viewport;
         self.session.cards = cards;
+        self.rebuild_regions();
+        if changed {
+            self.geometry_changed();
+        }
         Ok(())
     }
 

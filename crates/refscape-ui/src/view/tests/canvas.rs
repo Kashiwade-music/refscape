@@ -44,6 +44,7 @@ fn folded_context_keeps_clicks_and_connections_on_the_original_source_row(cx: &m
             cx,
         )
     });
+    cx.run_until_parked();
     view.update(cx, |view, cx| {
         view.session = session.clone();
         cx.notify();
@@ -140,6 +141,7 @@ fn context_symbols_and_revealed_lines_are_clickable_at_absolute_utf16_positions(
             cx,
         )
     });
+    cx.run_until_parked();
     let handle = cx.window_handle();
     cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
         .unwrap();
@@ -304,9 +306,7 @@ fn context_symbols_and_revealed_lines_are_clickable_at_absolute_utf16_positions(
     assert_eq!(requests.lock().unwrap().len(), 2);
 }
 #[gpui::test]
-fn hiding_a_card_applies_the_new_layout_to_the_canvas_and_connection_anchors(
-    cx: &mut TestAppContext,
-) {
+fn hiding_a_card_keeps_survivor_positions_and_updates_connection_anchors(cx: &mut TestAppContext) {
     let range = SourceRange {
         start: Position::new(12, 5),
         end: Position::new(12, 13),
@@ -334,6 +334,7 @@ fn hiding_a_card_applies_the_new_layout_to_the_canvas_and_connection_anchors(
             cx,
         )
     });
+    cx.run_until_parked();
     let handle = cx.window_handle();
     cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
         .unwrap();
@@ -346,6 +347,13 @@ fn hiding_a_card_applies_the_new_layout_to_the_canvas_and_connection_anchors(
     });
     cx.simulate_mouse_down(click, MouseButton::Left, Modifiers::default());
     cx.run_until_parked();
+    let before = view.read_with(cx, |view, _| {
+        view.session
+            .cards
+            .iter()
+            .map(|card| (card.id.clone(), card.position))
+            .collect::<Vec<_>>()
+    });
     view.update(cx, |view, cx| view.toggle_symbol(first, cx));
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
@@ -359,7 +367,10 @@ fn hiding_a_card_applies_the_new_layout_to_the_canvas_and_connection_anchors(
             .iter()
             .find(|card| card.source.symbol.path == second.path)
             .unwrap();
-        assert_eq!(target.position, Point::new(720.0, 50.0 + HEADER + 8.0));
+        assert_eq!(
+            target.position,
+            before.iter().find(|(id, _)| id == &target.id).unwrap().1
+        );
         assert_eq!(
             view.session
                 .cards
@@ -367,7 +378,7 @@ fn hiding_a_card_applies_the_new_layout_to_the_canvas_and_connection_anchors(
                 .find(|card| card.id == far)
                 .unwrap()
                 .position,
-            Point::new(1340.0, 50.0)
+            before.iter().find(|(id, _)| id == &far).unwrap().1
         );
         assert_eq!(view.session.viewport, viewport);
         assert_eq!(
@@ -503,8 +514,28 @@ fn definition_and_reference_edges_start_at_rendered_word_underlines(cx: &mut Tes
 }
 
 #[gpui::test]
-fn dropping_tall_cards_clears_their_rendered_bottoms_at_every_zoom(cx: &mut TestAppContext) {
-    let (explorer, _) = fixture();
+fn dragging_tall_cards_previews_then_places_only_the_target_at_every_zoom(cx: &mut TestAppContext) {
+    let (initial, _) = fixture();
+    let mut source = initial.session().cards[0].source.clone();
+    source.code = std::iter::repeat_n("fn source() {}", 12)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (mut explorer, _) = source_fixture(source, vec![]);
+    let first = explorer.session().cards[0].id.clone();
+    explorer.move_card(&first, Point::new(20.0, 10.0)).unwrap();
+    let range = explorer.session().cards[0].source.symbol.range;
+    let second = explorer
+        .add_symbol(
+            Symbol::file("second.rs".into(), range),
+            Point::new(20.0, 450.0),
+        )
+        .unwrap();
+    explorer
+        .add_symbol(
+            Symbol::file("third.rs".into(), range),
+            Point::new(20.0, 900.0),
+        )
+        .unwrap();
     let (view, cx) = cx.add_window_view(|window, cx| {
         ExplorerView::new(
             explorer,
@@ -516,44 +547,59 @@ fn dropping_tall_cards_clears_their_rendered_bottoms_at_every_zoom(cx: &mut Test
             cx,
         )
     });
+    cx.run_until_parked();
     let handle = cx.window_handle();
     for zoom in [0.75, 1.0, 1.5] {
         view.update(cx, |view, cx| {
-            let mut first = view.session.cards[0].clone();
-            first.source.code = std::iter::repeat_n("fn source() {}", 12)
-                .collect::<Vec<_>>()
-                .join("\n");
-            first.height = 128.0;
-            first.position = Point::new(20.0, 10.0);
-            let mut second = first.clone();
-            second.id = "second".into();
-            second.position.y = 170.0;
-            let mut third = first.clone();
-            third.id = "third".into();
-            third.position.y = 330.0;
-            view.session.cards = vec![first, second, third];
+            {
+                let mut explorer = view.explorer.lock().unwrap();
+                explorer
+                    .move_card(&second, Point::new(20.0, 450.0))
+                    .unwrap();
+                view.session = explorer.session().clone();
+            }
             view.session.viewport.zoom = zoom;
             view.session.viewport.offset = Point::new(13.0, 27.0);
             view.canvas.drag = Some(Drag::Card(
-                "second".into(),
+                second.clone(),
                 point(px(0.0), px(0.0)),
-                Point::new(20.0, 170.0),
+                Point::new(20.0, 450.0),
             ));
+            let fixed = [
+                view.session.cards[0].position,
+                view.session.cards[2].position,
+            ];
+            view.mouse_move(
+                &MouseMoveEvent {
+                    position: point(px(0.0), px(-440.0 * zoom)),
+                    ..Default::default()
+                },
+                cx,
+            );
+            assert_eq!(view.session.cards[1].position, Point::new(20.0, 450.0));
+            assert_eq!(
+                view.canvas.drag_preview,
+                Some((second.clone(), Point::new(20.0, 10.0)))
+            );
             view.finish_drag(cx);
+            assert_eq!(
+                [
+                    view.session.cards[0].position,
+                    view.session.cards[2].position
+                ],
+                fixed
+            );
         });
+        cx.run_until_parked();
         cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
             .unwrap();
         view.read_with(cx, |view, _| {
             assert!(view.canvas.drag.is_none());
-            let rects: Vec<_> = view
-                .session
-                .cards
-                .iter()
-                .map(|card| card_bounds(card, &view.session, view.canvas.bounds))
-                .collect();
-            for pair in rects.windows(2) {
-                assert!(f32::from(pair[1].top() - pair[0].bottom()) >= 32.0 * zoom - 0.001);
-            }
+            assert!(view.canvas.drag_preview.is_none());
+            assert_eq!(view.session.cards[0].position, Point::new(20.0, 10.0));
+            assert_eq!(view.session.cards[2].position, Point::new(20.0, 900.0));
+            refscape_canvas::layout::validate_layout(&view.session.cards, Default::default())
+                .unwrap();
             for painted in &view.canvas.painted {
                 let last_line_bottom =
                     painted.origin.y + px(painted.rows.len() as f32 * LINE * zoom);
@@ -564,18 +610,22 @@ fn dropping_tall_cards_clears_their_rendered_bottoms_at_every_zoom(cx: &mut Test
                     .iter()
                     .find(|card| card.id == painted.id)
                     .unwrap();
-                assert_eq!(painted.bounds.size.height, px(card.height * zoom));
+                assert_eq!(painted.bounds.size.height, px(card.display_height() * zoom));
             }
         });
     }
 }
 
 #[gpui::test]
-fn cards_moved_during_a_request_do_not_overlap_new_cards_on_completion(cx: &mut TestAppContext) {
-    let (explorer, _) = fixture();
-    let mut target = explorer.session().cards[0].source.symbol.clone();
-    target.id = "new-target".into();
-    target.path = "target.rs".into();
+fn cards_moved_during_a_request_place_new_cards_from_the_latest_parent(cx: &mut TestAppContext) {
+    let target = Symbol::file(
+        "target.rs".into(),
+        SourceRange {
+            start: Position::new(12, 5),
+            end: Position::new(12, 13),
+        },
+    );
+    let (explorer, requests) = fixture_with_targets(vec![target]);
     let (view, cx) = cx.add_window_view(|window, cx| {
         ExplorerView::new(
             explorer,
@@ -587,12 +637,21 @@ fn cards_moved_during_a_request_do_not_overlap_new_cards_on_completion(cx: &mut 
             cx,
         )
     });
+    cx.run_until_parked();
     view.update(cx, |view, cx| {
+        let parent = view.session.cards[0].id.clone();
         view.run_job(
             "Opening target",
             Box::new(move |explorer| {
-                explorer.add_symbol(target, Point::new(800.0, 50.0))?;
-                Ok(Output::default())
+                Ok(Output {
+                    prepared: Some(explorer.prepare_toggle_expansion(
+                        &parent,
+                        Position::new(12, 9),
+                        ConnectionKind::Definition,
+                        Point::new(90.0, HEADER + 8.0),
+                    )?),
+                    ..Default::default()
+                })
             }),
             cx,
         );
@@ -609,27 +668,40 @@ fn cards_moved_during_a_request_do_not_overlap_new_cards_on_completion(cx: &mut 
             },
             cx,
         );
-        view.finish_drag(cx);
+        assert_eq!(view.session.cards[0].position, Point::new(100.0, 50.0));
     });
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.session.cards.len(), 1);
+        assert!(view.layout.pending_output.is_some());
+        assert_eq!(view.session.cards[0].position, Point::new(100.0, 50.0));
+        assert!(view.requests.busy);
+    });
+    view.update(cx, |view, cx| view.finish_drag(cx));
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
         assert!(!view.requests.error);
         assert_eq!(view.session.cards.len(), 2);
         assert_eq!(view.session.cards[0].position, Point::new(800.0, 50.0));
-        let source = card_bounds(&view.session.cards[0], &view.session, view.canvas.bounds);
-        let target = card_bounds(&view.session.cards[1], &view.session, view.canvas.bounds);
-        assert!(f32::from(target.top() - source.bottom()) >= 32.0);
+        let parent = &view.session.cards[0];
+        assert_eq!(
+            view.session.cards[1].position,
+            Point::new(
+                parent.position.x + parent.width + 100.0,
+                parent.position.y + HEADER + 8.0
+            )
+        );
+        refscape_canvas::layout::validate_layout(&view.session.cards, Default::default()).unwrap();
     });
-    // A failing request also merges the current UI positions, then clears overlap.
+    assert_eq!(*requests.lock().unwrap(), vec![Position::new(12, 9)]);
+    // A failed read-only request leaves the committed positions exactly intact.
+    let before = view.read_with(cx, |view, _| view.session.cards.clone());
     view.update(cx, |view, cx| {
         view.search(cx);
-        view.session.cards[0].position = view.session.cards[1].position;
     });
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
         assert!(view.requests.error);
-        let source = card_bounds(&view.session.cards[0], &view.session, view.canvas.bounds);
-        let target = card_bounds(&view.session.cards[1], &view.session, view.canvas.bounds);
-        assert!(f32::from(target.top() - source.bottom()) >= 32.0);
+        assert_eq!(view.session.cards, before);
     });
 }

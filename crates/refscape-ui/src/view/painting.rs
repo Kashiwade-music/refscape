@@ -15,6 +15,7 @@ pub(super) struct PaintedCard {
 /// A row keeps its source mapping and each painted column together.
 pub(super) struct PaintedRow {
     pub(super) code: ShapedLine,
+    pub(super) world_code: ShapedLine,
     pub(super) position: Option<Position>,
     pub(super) fold: Option<usize>,
     pub(super) number: Option<PaintedNumber>,

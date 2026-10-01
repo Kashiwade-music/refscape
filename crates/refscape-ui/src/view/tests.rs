@@ -1,7 +1,9 @@
 //! UI regressions organized by user behavior.
 mod canvas;
+mod concurrency;
 mod fixtures;
 mod hover;
+mod layout;
 mod lifecycle;
 mod navigation;
 mod project;

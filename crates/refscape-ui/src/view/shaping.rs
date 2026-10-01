@@ -9,6 +9,20 @@ pub(super) struct CodeConnection {
     pub(super) end: gpui::Point<Pixels>,
 }
 
+/// The measured word edge at zoom one is independent of camera and clicked glyph.
+pub(super) fn symbol_anchor_offset(
+    card: &CodeCard,
+    painted: &PaintedCard,
+    position: Position,
+) -> Option<Point> {
+    let (row, word) = connected_word(card, position)?;
+    let line = &painted.rows.get(row)?.world_code;
+    Some(Point::new(
+        card.source.code_gutter_width() + f32::from(line.x_for_index(word.end)),
+        HEADER + 8.0 + row as f32 * LINE,
+    ))
+}
+
 /// Locate the displayed word using the server's absolute UTF-16 token range.
 /// Without semantic tokens, use ordinary text word selection, never code analysis.
 pub(super) fn connected_word(card: &CodeCard, position: Position) -> Option<(usize, Range<usize>)> {
@@ -84,21 +98,19 @@ pub(super) fn code_connections(
                 &from.source.tokens,
                 &session.theme.palette,
             );
-            let line = window.text_system().shape_line(
-                text.to_string().into(),
-                px(12.0 * zoom),
-                &runs,
-                None,
-            );
+            let line =
+                window
+                    .text_system()
+                    .shape_line(text.to_string().into(), px(12.0), &runs, None);
             let rect = card_bounds(from, session, canvas);
             let x = rect.left() + px(from.source.code_gutter_width() * zoom);
             let y = rect.top()
                 + px((HEADER + 8.0 + row as f32 * LINE) * zoom)
-                + gpui::underline_y_offset(px(LINE * zoom), line.ascent, line.descent);
+                + gpui::underline_y_offset(px(LINE), line.ascent, line.descent) * zoom;
             let underline = Bounds::new(
-                point(x + line.x_for_index(span.start), y),
+                point(x + line.x_for_index(span.start) * zoom, y),
                 size(
-                    line.x_for_index(span.end) - line.x_for_index(span.start),
+                    (line.x_for_index(span.end) - line.x_for_index(span.start)) * zoom,
                     px((1.5 * zoom).max(1.0)),
                 ),
             );

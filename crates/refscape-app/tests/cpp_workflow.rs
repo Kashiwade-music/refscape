@@ -132,6 +132,50 @@ fn explorer() -> TestExplorer {
     )
 }
 
+fn arrange_and_undo(explorer: &mut TestExplorer, root: &str) {
+    let ids: Vec<_> = explorer
+        .session()
+        .cards
+        .iter()
+        .filter(|card| card.id != root)
+        .map(|card| card.id.clone())
+        .collect();
+    for (index, id) in ids.iter().enumerate() {
+        explorer
+            .move_card(
+                id,
+                Point::new(
+                    10000.0 + index as f32 * 2000.0,
+                    5000.0 + index as f32 * 500.0,
+                ),
+            )
+            .unwrap();
+    }
+    let before = explorer.session().clone();
+    assert!(explorer.arrange_layout(Some(root)).unwrap());
+    assert_eq!(explorer.session().connections, before.connections);
+    assert_eq!(explorer.session().viewport, before.viewport);
+    for original in &before.cards {
+        let current = explorer
+            .session()
+            .cards
+            .iter()
+            .find(|card| card.id == original.id)
+            .unwrap();
+        assert_eq!(current.source, original.source);
+        assert_eq!(
+            (current.width, current.height),
+            (original.width, original.height)
+        );
+        if original.id == root {
+            assert_eq!(current.position, original.position);
+        }
+    }
+    assert!(explorer.undo_layout().unwrap());
+    assert_eq!(explorer.session().cards, before.cards);
+    assert!(explorer.arrange_layout(Some(root)).unwrap());
+}
+
 fn json_path(path: &Path) -> String {
     // clang accepts ordinary slash-separated Windows paths; omit Rust's verbatim prefix.
     json_string(
@@ -292,6 +336,7 @@ fn real_c_and_cpp_navigation_and_external_database_session_restore() {
             .any(|edge| { edge.kind == ConnectionKind::TypeDefinition && edge.from == entry })
     );
     let count = explorer.session().cards.len();
+    let before_reuse = explorer.session().cards.clone();
     assert!(
         explorer
             .expand_definition(&entry, position(&entry_path, "scale(2)"))
@@ -299,7 +344,20 @@ fn real_c_and_cpp_navigation_and_external_database_session_restore() {
             .contains(&scale)
     );
     assert_eq!(explorer.session().cards.len(), count);
+    for original in &before_reuse {
+        assert_eq!(
+            explorer
+                .session()
+                .cards
+                .iter()
+                .find(|card| card.id == original.id)
+                .unwrap()
+                .position,
+            original.position
+        );
+    }
     explorer.pan(Point::new(150.0, -45.0)).unwrap();
+    arrange_and_undo(&mut explorer, &entry);
     explorer.session().validate().unwrap();
 
     let session_path = fixture.temp.join("sessions/cpp-review.json");
@@ -409,6 +467,7 @@ fn simple_c_project_opens_without_a_compilation_database() {
             .iter()
             .any(|card| !card.source.tokens.is_empty())
     );
+    arrange_and_undo(&mut explorer, &entry);
     explorer.session().validate().unwrap();
     drop(explorer);
 }

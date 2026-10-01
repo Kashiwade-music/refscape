@@ -103,10 +103,23 @@ fn real_project_navigation_and_named_session_restore() {
             .any(|token| token.kind == "function")
     );
     let answer_name = answer_card.source.symbol.selection_range.start;
+    let before_reuse = explorer.session().cards.clone();
     let references = explorer.expand_references(&answer, answer_name).unwrap();
     assert!(references.contains(&origin));
     assert_eq!(explorer.session().cards.len(), 2);
     assert_eq!(explorer.session().connections.len(), 2);
+    for original in &before_reuse {
+        assert_eq!(
+            explorer
+                .session()
+                .cards
+                .iter()
+                .find(|card| card.id == original.id)
+                .unwrap()
+                .position,
+            original.position
+        );
+    }
     assert!(
         explorer
             .session()
@@ -123,7 +136,20 @@ fn real_project_navigation_and_named_session_restore() {
     assert_eq!(explorer.session().cards.len(), 2);
     assert_eq!(explorer.session().connections.len(), 2);
 
+    let before_add = explorer.session().cards.clone();
     let whole_file = explorer.add_file(&lib, Point::new(80.0, 600.0)).unwrap();
+    for original in &before_add {
+        assert_eq!(
+            explorer
+                .session()
+                .cards
+                .iter()
+                .find(|card| card.id == original.id)
+                .unwrap()
+                .position,
+            original.position
+        );
+    }
     let file_card = explorer
         .session()
         .cards
@@ -138,6 +164,49 @@ fn real_project_navigation_and_named_session_restore() {
         whole_file
     );
     assert_eq!(explorer.session().cards.len(), 3);
+
+    explorer
+        .move_card(&answer, Point::new(8000.0, 6000.0))
+        .unwrap();
+    let before_arrange = explorer.session().clone();
+    assert!(explorer.arrange_layout(Some(&origin)).unwrap());
+    assert_eq!(explorer.session().connections, before_arrange.connections);
+    assert_eq!(explorer.session().viewport, before_arrange.viewport);
+    for original in &before_arrange.cards {
+        let current = explorer
+            .session()
+            .cards
+            .iter()
+            .find(|card| card.id == original.id)
+            .unwrap();
+        assert_eq!(current.source, original.source);
+        assert_eq!(
+            (current.width, current.height),
+            (original.width, original.height)
+        );
+        if original.id != answer {
+            assert_eq!(current.position, original.position);
+        }
+    }
+    let root_card = explorer
+        .session()
+        .cards
+        .iter()
+        .find(|card| card.id == origin)
+        .unwrap();
+    let child = explorer
+        .session()
+        .cards
+        .iter()
+        .find(|card| card.id == answer)
+        .unwrap();
+    assert!(
+        f64::from(child.position.x)
+            >= f64::from(root_card.position.x) + f64::from(root_card.width) + 100.0
+    );
+    assert!(explorer.undo_layout().unwrap());
+    assert_eq!(explorer.session().cards, before_arrange.cards);
+    assert!(explorer.arrange_layout(Some(&origin)).unwrap());
 
     explorer
         .move_card(&origin, Point::new(-125.0, 315.0))

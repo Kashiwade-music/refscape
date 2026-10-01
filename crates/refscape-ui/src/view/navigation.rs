@@ -26,8 +26,8 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         self.run_job(
             "Opening source file…",
             Box::new(move |explorer| {
-                explorer.add_file(&path, position)?;
                 Ok(Output {
+                    prepared: Some(explorer.prepare_add_file(&path, position)?),
                     symbols: Some(explorer.symbols(&path)?),
                     ..Default::default()
                 })
@@ -36,17 +36,40 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         );
     }
     pub(super) fn toggle_symbol(&mut self, symbol: Symbol, cx: &mut Context<Self>) {
+        if let Some(id) = self
+            .session
+            .cards
+            .iter()
+            .find(|card| {
+                card.source.symbol.path == symbol.path
+                    && (card.source.symbol.id == symbol.id
+                        || (card.source.symbol.kind == symbol.kind
+                            && card.source.symbol.range == symbol.range))
+            })
+            .map(|card| card.id.clone())
+        {
+            self.layout_activity(cx);
+            self.canvas.selected = Some(id);
+            cx.notify();
+            self.remove_selected(cx);
+            return;
+        }
         let position = self.insertion_point();
         self.run_job(
             "Toggling symbol…",
             Box::new(move |explorer| {
-                explorer.toggle_symbol(symbol, position)?;
-                Ok(Output::default())
+                Ok(Output {
+                    prepared: Some(explorer.prepare_add_symbol(symbol, position)?),
+                    ..Default::default()
+                })
             }),
             cx,
         );
     }
     pub(super) fn remove_selected(&mut self, cx: &mut Context<Self>) {
+        if self.requests.busy || self.requests.closing {
+            return;
+        }
         if let Some(id) = self.canvas.selected.take() {
             self.clear_inspection();
             self.run_job(

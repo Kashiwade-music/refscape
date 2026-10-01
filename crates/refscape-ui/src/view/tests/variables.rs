@@ -13,6 +13,7 @@ fn variable_click_highlights_identity_and_toggles_type_at_any_glyph(cx: &mut Tes
             cx,
         )
     });
+    cx.run_until_parked();
     let handle = cx.window_handle();
     for (glyph, count) in [("日本😀ca", 2), ("日本😀c", 1), ("日本😀", 2)] {
         cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
@@ -83,6 +84,7 @@ fn primitive_variable_keeps_highlights_and_alt_click_opens_binding(cx: &mut Test
             cx,
         )
     });
+    cx.run_until_parked();
     let handle = cx.window_handle();
     cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
         .unwrap();
@@ -141,6 +143,7 @@ fn clearing_selection_during_analysis_does_not_restore_stale_highlights(cx: &mut
             cx,
         )
     });
+    cx.run_until_parked();
     let handle = cx.window_handle();
     cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
         .unwrap();

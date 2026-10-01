@@ -446,6 +446,28 @@ pub const CODE_REGION_PADDING: f32 = 22.0;
 pub const CODE_REGION_HEADER: f32 = 36.0;
 
 impl CodeCard {
+    /// Dimensions and edges must remain usable in the stored world coordinates.
+    pub fn validate_geometry(&self) -> Result<(), String> {
+        if !self.position.is_finite()
+            || !self.width.is_finite()
+            || !self.height.is_finite()
+            || self.width <= 0.0
+            || self.height <= 0.0
+        {
+            return Err("Card geometry must be finite and positive".into());
+        }
+        let right = self.position.x + self.width;
+        let bottom = self.position.y + self.display_height();
+        if !right.is_finite()
+            || !bottom.is_finite()
+            || right <= self.position.x
+            || bottom <= self.position.y
+        {
+            return Err("Card edges must be finite and representable".into());
+        }
+        Ok(())
+    }
+
     /// World-space height shared by painting and collision detection, including
     /// source that outgrew the dimensions stored in an older session.
     pub fn display_height(&self) -> f32 {
@@ -646,15 +668,8 @@ impl Session {
             if card.id.is_empty() || !cards.insert(card.id.as_str()) {
                 return Err("Card IDs must be nonempty and unique".into());
             }
-            if !card.position.is_finite()
-                || !card.width.is_finite()
-                || !card.height.is_finite()
-                || card.width <= 0.0
-                || card.height <= 0.0
-            {
-                return Err("Card geometry must be finite and positive".into());
-            }
             card.source.validate()?;
+            card.validate_geometry()?;
         }
         let mut connections = HashSet::new();
         for connection in &self.connections {
@@ -697,6 +712,9 @@ pub fn utf16_byte_offset(text: &str, column: u32) -> Option<usize> {
     }
     (units == column).then_some(text.len())
 }
+
+#[cfg(test)]
+mod geometry_tests;
 
 #[cfg(test)]
 mod tests {

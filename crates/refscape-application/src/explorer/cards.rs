@@ -1,8 +1,30 @@
 use super::*;
 
 impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
-    /// Reveal one contiguous omitted span in this card, retaining its source coordinates.
     pub fn expand_context(&mut self, id: &str, index: usize) -> Result<()> {
+        let edit = self.prepare_context(id, index, true)?;
+        self.commit_prepared(edit).map(|_| ())
+    }
+
+    pub fn collapse_context(&mut self, id: &str, index: usize) -> Result<()> {
+        let edit = self.prepare_context(id, index, false)?;
+        self.commit_prepared(edit).map(|_| ())
+    }
+
+    pub(super) fn context_source(
+        &mut self,
+        id: &str,
+        index: usize,
+        expand: bool,
+    ) -> Result<SourceDocument> {
+        if expand {
+            self.expanded_source(id, index)
+        } else {
+            self.collapsed_source(id, index)
+        }
+    }
+    /// Reveal one contiguous omitted span in this card, retaining its source coordinates.
+    fn expanded_source(&mut self, id: &str, index: usize) -> Result<SourceDocument> {
         let card_index = self
             .session
             .cards
@@ -61,10 +83,10 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
             code: hidden,
         });
         source.folded.retain(|gap| gap.start_line != range.start);
-        self.replace_card_source(card_index, source)
+        Ok(source)
     }
 
-    pub fn collapse_context(&mut self, id: &str, index: usize) -> Result<()> {
+    fn collapsed_source(&mut self, id: &str, index: usize) -> Result<SourceDocument> {
         let card_index = self
             .session
             .cards
@@ -88,50 +110,44 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
             .retain(|gap| gap.start_line != hidden.start_line);
         source.folded.push(hidden);
         source.folded.sort_by_key(|gap| gap.start_line);
-        self.replace_card_source(card_index, source)
+        Ok(source)
     }
 
-    fn replace_card_source(&mut self, card_index: usize, source: SourceDocument) -> Result<()> {
+    pub(super) fn replace_card_source(
+        &mut self,
+        card_index: usize,
+        source: SourceDocument,
+    ) -> Result<()> {
         source.validate()?;
         let mut cards = self.session.cards.clone();
         let (width, height) = source_dimensions(&source);
+        let plan = plan_resize(
+            &cards,
+            &cards[card_index].id,
+            width,
+            height,
+            LayoutRules::default(),
+        )?;
         cards[card_index].source = source;
         cards[card_index].width = width;
         cards[card_index].height = height;
-        let anchor = Point::new(
-            cards
-                .iter()
-                .map(|card| card.position.x)
-                .fold(f32::INFINITY, f32::min),
-            cards
-                .iter()
-                .map(|card| card.position.y)
-                .fold(f32::INFINITY, f32::min),
-        );
-        compact_cards(&mut cards, anchor, &self.session.connections)?;
+        plan.apply_positions(&mut cards, LayoutRules::default())?;
+        let mut session = self.session.clone();
+        session.cards = cards.clone();
+        session.validate()?;
         self.session.cards = cards;
         self.rebuild_regions();
+        self.content_changed();
         Ok(())
     }
 
     pub fn add_symbol(&mut self, symbol: Symbol, position: Point) -> Result<String> {
-        if !position.is_finite() {
-            return Err("Card position must be finite".into());
-        }
-        if let Some(card) = self.card_for_symbol(&symbol) {
-            return Ok(card.id.clone());
-        }
-        let source = self.language.source(&symbol)?;
-        source.validate()?;
-        if let Some(card) = self.card_for_symbol(&source.symbol) {
-            return Ok(card.id.clone());
-        }
-        let (width, height) = source_dimensions(&source);
-        let occupied: Vec<_> = self.session.cards.iter().map(CardRect::from).collect();
-        let placement = vacant_position(position, width, height, &occupied)?;
-        let id = self.insert_source(source, placement);
-        self.rebuild_regions();
-        Ok(id)
+        let edit = self.prepare_add_symbol(symbol, position)?;
+        self.commit_prepared(edit)?
+            .targets
+            .into_iter()
+            .next()
+            .ok_or("Added source has no card".into())
     }
 
     pub fn add_file(&mut self, path: &Path, position: Point) -> Result<String> {
@@ -156,13 +172,39 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
             return Err("Card position must be finite".into());
         }
         let mut cards = self.session.cards.clone();
+        let target = cards
+            .iter()
+            .find(|card| card.id == id)
+            .ok_or_else(|| format!("Unknown card {id}"))?;
+        let occupied: Vec<_> = cards
+            .iter()
+            .filter(|card| card.id != id)
+            .map(CardRect::from)
+            .collect();
+        let placement = nearest_vacant_position(
+            position,
+            target.width,
+            target.display_height(),
+            None,
+            &occupied,
+            LayoutRules::default(),
+        )?;
         cards
             .iter_mut()
-            .find(|c| c.id == id)
-            .ok_or_else(|| format!("Unknown card {id}"))?
-            .position = position;
-        arrange_cards(&mut cards)?;
+            .find(|card| card.id == id)
+            .unwrap()
+            .position = placement.position;
+        validate_layout(&cards, LayoutRules::default())?;
+        let mut candidate = self.session.clone();
+        candidate.cards = cards.clone();
+        candidate.validate()?;
+        let changed = cards != self.session.cards;
         self.session.cards = cards;
+        self.rebuild_regions();
+        if changed {
+            self.geometry_changed();
+        }
+        self.layout_undo = None;
         Ok(())
     }
 
@@ -180,26 +222,15 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
             }
         }
         let removed = descendant_cards(&self.session.connections, ids, preserved);
-        let anchor = Point::new(
-            self.session
-                .cards
-                .iter()
-                .map(|card| card.position.x)
-                .fold(f32::INFINITY, f32::min),
-            self.session
-                .cards
-                .iter()
-                .map(|card| card.position.y)
-                .fold(f32::INFINITY, f32::min),
-        );
         let mut cards = self.session.cards.clone();
         cards.retain(|card| !removed.contains(&card.id));
-        compact_cards(&mut cards, anchor, &self.session.connections)?;
+        validate_layout(&cards, LayoutRules::default())?;
         self.session.cards = cards;
         self.session
             .connections
             .retain(|edge| !removed.contains(&edge.from) && !removed.contains(&edge.to));
         self.rebuild_regions();
+        self.content_changed();
         Ok(())
     }
 }

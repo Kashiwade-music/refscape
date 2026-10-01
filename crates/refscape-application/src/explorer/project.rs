@@ -18,11 +18,12 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
         self.session.project_options = self.language.project_options();
         self.session.theme = theme;
         self.project_crates = project_crates;
+        self.reset_generation();
         Ok(())
     }
 
     pub fn save_session(&self, path: &Path) -> Result<()> {
-        self.session.validate()?;
+        self.validate_canvas()?;
         self.repository.save(path, &self.session)
     }
 
@@ -84,7 +85,8 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
 
     pub(super) fn restore_session(&mut self, mut session: Session) -> Result<()> {
         session.validate()?;
-        arrange_cards(&mut session.cards)?;
+        let plan = plan_restore_repair(&session.cards, LayoutRules::default())?;
+        plan.apply_positions(&mut session.cards, LayoutRules::default())?;
         self.language
             .open_project(&session.project_root, &session.project_options)?;
         let effective_options = self.language.project_options();
@@ -92,20 +94,10 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
             session.project_options = effective_options;
         }
         let project_crates = self.language.project_crates()?;
-        for card in &mut session.cards {
-            if card.source.expanded.is_empty()
-                && card
-                    .source
-                    .context
-                    .iter()
-                    .any(|header| header.code.lines().count() > 1)
-                && let Ok(current) = self.language.source(&card.source.symbol)
-            {
-                card.source.recover_expanded_context(&current.context);
-            }
-        }
         self.session = session;
         self.project_crates = project_crates;
+        self.rebuild_regions();
+        self.reset_generation();
         Ok(())
     }
 }

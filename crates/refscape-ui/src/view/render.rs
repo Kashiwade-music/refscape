@@ -37,6 +37,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
         let query_palette = palette.clone();
         let session = self.session.clone();
         let selected = self.canvas.selected.clone();
+        let preview = self.canvas.drag_preview.clone();
         let root = session.project_root.clone();
         let lower = query.to_lowercase();
         let files: Vec<_> = self
@@ -48,7 +49,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
             .collect();
         let symbols = self.project.symbols.clone();
         let toolbar = div()
-            .h(px(60.0))
+            .min_h(px(60.0))
             .flex_shrink_0()
             .px_4()
             .flex()
@@ -58,6 +59,9 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
             .border_color(color(&palette.border))
             .child(
                 div()
+                    .flex_shrink_0()
+                    .max_w(px(220.0))
+                    .overflow_hidden()
                     .child(div().text_size(px(20.0)).child("Refscape"))
                     .child(
                         div()
@@ -69,6 +73,10 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
             .child(
                 div()
                     .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .justify_end()
+                    .flex_wrap()
                     .gap_2()
                     .child(self.button("Open project", cx, |v, cx| v.pick_project(cx)))
                     .child(self.button("Build settings", cx, |v, cx| {
@@ -78,6 +86,12 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                     .child(self.button("Save as", cx, |v, cx| v.pick_session(true, cx)))
                     .child(self.button("Open session", cx, |v, cx| v.pick_session(false, cx)))
                     .child(self.button("Fit · 0", cx, |v, cx| v.fit(cx)))
+                    .child(self.button("Arrange", cx, |v, cx| v.arrange_layout(cx)))
+                    .children(
+                        self.layout
+                            .can_undo
+                            .then(|| self.button("Undo layout", cx, |v, cx| v.undo_layout(cx))),
+                    )
                     .child(self.button(
                         &format!("Theme: {}", self.session.theme.name),
                         cx,
@@ -144,8 +158,12 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|v, e: &MouseDownEvent, _, cx| {
+                    if v.requests.closing {
+                        return;
+                    }
                     v.clear_hover(cx);
                     v.canvas.drag = Some(Drag::Pan(e.position));
+                    v.layout_activity(cx);
                     cx.notify();
                 }),
             )
@@ -189,6 +207,20 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                             window,
                             cx,
                         );
+                        if let Some((id, position)) = &preview
+                            && let Some(card) = session.cards.iter().find(|card| &card.id == id)
+                        {
+                            let mut preview_card = card.clone();
+                            preview_card.position = *position;
+                            window.paint_quad(quad(
+                                card_bounds(&preview_card, &session, bounds),
+                                px(7.0 * session.viewport.zoom),
+                                color(&session.theme.palette.accent).opacity(0.08),
+                                px(2.0),
+                                color(&session.theme.palette.accent),
+                                Default::default(),
+                            ));
+                        }
                         entity.update(cx, |v, _| {
                             v.canvas.painted = painted;
                             v.canvas.bounds = bounds;

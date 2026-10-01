@@ -28,6 +28,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         if self.requests.closing {
             return;
         }
+        self.layout_activity(cx);
         let range = range
             .or_else(|| self.search.marked.clone())
             .unwrap_or_else(|| self.search.selection.clone());

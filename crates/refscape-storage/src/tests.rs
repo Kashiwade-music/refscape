@@ -93,6 +93,29 @@ fn legacy_settings_and_sessions_default_to_automatic_language_detection() {
 }
 
 #[test]
+fn obsolete_layout_settings_are_ignored_and_removed_when_resaved() {
+    let directory = TestDirectory::new();
+    let path = directory.path("session.json");
+    let session = Session::new(directory.0.clone());
+    for obsolete in [
+        serde_json::json!({"auto_compact_enabled":true,"auto_compact_min_reduction_percent":30}),
+        serde_json::json!({"auto_compact_enabled":false,"auto_compact_min_reduction_percent":0}),
+        serde_json::json!({"auto_compact_enabled":"unknown","auto_compact_min_reduction_percent":999}),
+        serde_json::json!(null),
+    ] {
+        let mut legacy = serde_json::to_value(&session).unwrap();
+        legacy["layout_settings"] = obsolete;
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let restored = JsonSessionRepository.load(&path).unwrap();
+        assert_eq!(restored, session);
+        assert_eq!(restored.version, 1);
+        JsonSessionRepository.save(&path, &restored).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(saved.get("layout_settings").is_none());
+    }
+}
+
+#[test]
 fn partially_specified_project_options_use_field_defaults() {
     let options: ProjectOptions = serde_json::from_str(r#"{"language":"cpp"}"#).unwrap();
     assert_eq!(options.language, ProjectLanguage::Cpp);
@@ -188,6 +211,13 @@ fn session_roundtrip_preserves_canvas_code_connections_and_theme() {
         zoom: 0.75,
     };
     session.theme = Theme::light();
+    // Version 1 snapshots with obsolete layout settings retain source and coordinates.
+    let mut legacy = serde_json::to_value(&session).unwrap();
+    legacy["layout_settings"] =
+        serde_json::json!({"auto_compact_enabled":true,"auto_compact_min_reduction_percent":30});
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert_eq!(JsonSessionRepository.load(&path).unwrap(), session);
     JsonSessionRepository.save(&path, &session).unwrap();
     assert_eq!(JsonSessionRepository.load(&path).unwrap(), session);
     let hidden = session.cards[1].source.folded.remove(0);

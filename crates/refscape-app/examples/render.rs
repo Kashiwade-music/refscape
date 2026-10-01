@@ -1,5 +1,5 @@
 //! Render a real GPUI scene into a PNG for visual verification.
-//! cargo run -p refscape-app --example render --features visual-tests -- PROJECT OUTPUT [light] [variable] [unfold] [--compile-commands PATH]
+//! cargo run -p refscape-app --example render --features visual-tests -- PROJECT OUTPUT [light] [variable] [unfold] [arrange] [--compile-commands PATH]
 use std::{env, path::PathBuf};
 
 use refscape_application::explorer::Explorer;
@@ -79,6 +79,26 @@ fn main() {
             explorer.expand_definition(&id, call).unwrap();
         }
     }
+    if options.iter().any(|option| option == "arrange") && !variable {
+        let source = &explorer
+            .session()
+            .cards
+            .iter()
+            .find(|card| card.id == id)
+            .unwrap()
+            .source;
+        let calls: Vec<_> = source
+            .tokens
+            .iter()
+            .filter(|token| {
+                token.kind == "function" && token.line > source.symbol.selection_range.start.line
+            })
+            .map(|token| refscape_model::Position::new(token.line, token.start))
+            .collect();
+        for position in calls {
+            explorer.expand_definition(&id, position).unwrap();
+        }
+    }
     if options.iter().any(|option| option == "unfold") {
         let gaps: Vec<_> = explorer
             .session()
@@ -93,6 +113,9 @@ fn main() {
         for (id, index) in gaps {
             explorer.expand_context(&id, index).unwrap();
         }
+    }
+    if options.iter().any(|option| option == "arrange") {
+        explorer.arrange_layout(Some(&id)).unwrap();
     }
     let cards = &explorer.session().cards;
     let left = cards

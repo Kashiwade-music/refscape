@@ -1,4 +1,51 @@
 use super::*;
+
+#[gpui::test]
+fn a_drop_during_a_read_request_waits_for_the_backend_and_commits_once(cx: &mut TestAppContext) {
+    let (explorer, _) = fixture();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        ExplorerView::new(
+            explorer,
+            "session.json".into(),
+            vec![],
+            None,
+            ProjectOptions::default(),
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    view.update(cx, |view, cx| {
+        view.search(cx);
+        let card = &view.session.cards[0];
+        view.canvas.drag = Some(Drag::Card(
+            card.id.clone(),
+            point(px(0.0), px(0.0)),
+            card.position,
+        ));
+        view.mouse_move(
+            &MouseMoveEvent {
+                position: point(px(100.0), px(50.0)),
+                ..Default::default()
+            },
+            cx,
+        );
+        view.finish_drag(cx);
+        assert!(view.requests.busy);
+        assert_eq!(view.session.cards[0].position, Point::new(100.0, 50.0));
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert!(!view.requests.busy);
+        assert_eq!(view.session.cards[0].position, Point::new(200.0, 100.0));
+        assert!(view.layout.pending_drop.is_none());
+        assert_eq!(
+            view.session.cards,
+            view.explorer.lock().unwrap().session().cards
+        );
+    });
+}
+
 #[gpui::test]
 fn asynchronous_failure_keeps_canvas_movement_and_pointer_zoom_anchor(cx: &mut TestAppContext) {
     let (explorer, _) = fixture();
@@ -13,6 +60,7 @@ fn asynchronous_failure_keeps_canvas_movement_and_pointer_zoom_anchor(cx: &mut T
             cx,
         )
     });
+    cx.run_until_parked();
     view.update(cx, |view, cx| {
         view.search(cx);
         let anchor = Point::new(400.0, 200.0);
@@ -71,6 +119,7 @@ fn portable_custom_theme_survives_cycle_and_close_waits_for_requests(cx: &mut Te
             cx,
         )
     });
+    cx.run_until_parked();
     view.update_in(cx, |view, window, cx| {
         assert_eq!(view.project.themes.len(), 3);
         view.requests.busy = true;
