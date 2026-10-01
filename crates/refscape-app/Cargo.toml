@@ -9,7 +9,16 @@ publish.workspace = true
 name = "refscape"
 path = "src/main.rs"
 
+[features]
+visual-tests = ["gpui/test-support", "gpui_platform/test-support"]
+
+[[example]]
+name = "render"
+required-features = ["visual-tests"]
+
 [dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
 refscape-application.workspace = true
 refscape-language.workspace = true
 refscape-model.workspace = true

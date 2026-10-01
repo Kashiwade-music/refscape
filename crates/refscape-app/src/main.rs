@@ -1,3 +1,184 @@
-//! Application entry point and composition of concrete adapters and views.
+//! Composition root: GPUI, rust-analyzer, and versioned JSON storage.
 
-fn main() {}
+mod options;
+
+use std::{
+    cell::RefCell,
+    env,
+    path::Path,
+    process::ExitCode,
+    rc::Rc,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
+use refscape_application::{Explorer, SessionRepository};
+use refscape_language::RustAnalyzer;
+use refscape_model::{Point, Theme};
+use refscape_storage::{JsonSessionRepository, default_session_path, load_theme, save_theme};
+use refscape_ui::ExplorerView;
+
+use options::{HELP, Options};
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Refscape: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), String> {
+    let mut options = Options::parse(env::args_os().skip(1))?;
+    if options.help {
+        print!("{HELP}");
+        return Ok(());
+    }
+    if let Some((name, path)) = options.export_theme {
+        let theme = if name == "light" {
+            Theme::light()
+        } else {
+            Theme::dark()
+        };
+        save_theme(&path, &theme)?;
+        println!("Saved {} theme to {}", theme.name, path.display());
+        return Ok(());
+    }
+    let analyzer = options
+        .analyzer
+        .or_else(|| env::var_os("REFSCAPE_RUST_ANALYZER").map(Into::into))
+        .unwrap_or_else(|| "rust-analyzer".into());
+    let mut explorer = Explorer::new(RustAnalyzer::new(analyzer), JsonSessionRepository);
+    if options.check {
+        return check_project(
+            &mut explorer,
+            options
+                .project
+                .as_deref()
+                .ok_or("--check requires a project")?,
+        );
+    }
+    let mut themes = Vec::new();
+    if let Some(path) = options.theme {
+        let theme = load_theme(&path)?;
+        explorer.set_theme(theme.clone())?;
+        themes.push(theme);
+    }
+    if let Some(path) = options.session.as_ref().filter(|path| path.exists()) {
+        let session = JsonSessionRepository.load(path)?;
+        if let Some(project) = &options.project {
+            let project = std::fs::canonicalize(project)
+                .map_err(|e| format!("cannot open {}: {e}", project.display()))?;
+            let saved = std::fs::canonicalize(&session.project_root).map_err(|e| e.to_string())?;
+            if project != saved {
+                return Err("the selected session belongs to a different project; omit PROJECT to open its project".into());
+            }
+        }
+        options.project = Some(session.project_root);
+    }
+    let project = options
+        .project
+        .map(|path| {
+            std::fs::canonicalize(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))
+        })
+        .transpose()?;
+    let session_path = options.session.unwrap_or_else(|| {
+        project
+            .as_deref()
+            .map(default_session_path)
+            .unwrap_or_default()
+    });
+    let launch_error = Rc::new(RefCell::new(None));
+    let window_error = launch_error.clone();
+    gpui_platform::application().run(move |cx: &mut App| {
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+        let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
+        if let Err(error) = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                app_id: Some("dev.refscape.Refscape".into()),
+                ..Default::default()
+            },
+            move |window, cx| {
+                window.set_window_title("Refscape");
+                cx.new(|cx| ExplorerView::new(explorer, session_path, themes, project, window, cx))
+            },
+        ) {
+            *window_error.borrow_mut() = Some(format!("cannot open window: {error}"));
+            cx.quit();
+        }
+        cx.activate(true);
+    });
+    match launch_error.borrow_mut().take() {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Real-backend smoke check, with a disposable session that never overwrites user work.
+fn check_project(
+    explorer: &mut Explorer<RustAnalyzer, JsonSessionRepository>,
+    project: &Path,
+) -> Result<(), String> {
+    let project = std::fs::canonicalize(project).map_err(|e| e.to_string())?;
+    explorer.open_project(&project)?;
+    let files = explorer.files()?;
+    let mut selected = None;
+    for path in &files {
+        if let Some(symbol) = explorer.symbols(path)?.into_iter().next() {
+            selected = Some(symbol);
+            break;
+        }
+    }
+    let symbol = selected.ok_or("project contains no Rust symbols")?;
+    let position = symbol.selection_range.start;
+    let id = explorer.add_symbol(symbol, Point::new(40.0, 40.0))?;
+    let card = explorer
+        .session()
+        .cards
+        .iter()
+        .find(|card| card.id == id)
+        .ok_or("source card was not created")?;
+    if card.source.code.is_empty() {
+        return Err("language backend returned empty source".into());
+    }
+    let token_count = card.source.tokens.len();
+    let definitions = explorer.expand_definition(&id, position)?.len();
+    let references = explorer.expand_references(&id, position)?.len();
+    explorer.move_card(&id, Point::new(120.0, 80.0))?;
+    explorer.pan(Point::new(-20.0, 35.0))?;
+    explorer.zoom(0.8, Point::new(200.0, 200.0))?;
+    let snapshot = explorer.session().clone();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let path = env::temp_dir().join(format!(
+        "refscape-check-{}-{stamp}.json",
+        std::process::id()
+    ));
+    let result: Result<(), String> = (|| {
+        explorer.save_session(&path)?;
+        explorer.load_session(&path)?;
+        if explorer.session() != &snapshot {
+            return Err("saved session did not restore exactly".into());
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(path);
+    result?;
+    println!(
+        "Refscape check passed: {} Rust files, {} cards, {} connections; {definitions} definition results, {references} reference results, {token_count} semantic tokens; canvas and session roundtrip verified",
+        files.len(),
+        snapshot.cards.len(),
+        snapshot.connections.len()
+    );
+    Ok(())
+}

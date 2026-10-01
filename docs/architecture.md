@@ -13,7 +13,7 @@
 | `xtask` | 構造検査、依存グラフの生成、開発用ゲート | 製品への依存なし |
 
 表の依存先は `refscape-` を省略したもの。許可する依存先の上限を示す。
-現時点の製品crateはドキュメントと空のエントリーポイントだけで、機能の実装は含まない。
+製品crateはRustプロジェクトの解析、Canvas操作、バージョン付き永続化、GPUIの画面を実装する。
 
 `application` が `LanguageService` や `SessionRepository` といったtraitを定義し、
 `language` と `storage` がそれを実装する。`app` が具体的な実装を生成して渡す。
@@ -26,6 +26,31 @@ Canvasの状態や配置規則はUI非依存とし、ファイルの保存形式
 テーマの意味的な定義は `model`、保存は `storage`、描画用の型への変換は `ui` が担当する。
 コードの構造解析はREADMEの方針に従いLSP等の公式機能を利用し、未対応の機能を推測で補わない。
 
+## データと操作の境界
+
+ソース位置はLSPと同じ0始まりの行・UTF-16列で保持し、UTF-8本文の切り出し時に変換する。
+シンボルの範囲とsemantic tokenは元のファイルに対する絶対位置を持つため、
+カード上のクリックは抜粋の開始位置を加えて定義・参照要求に変換する。
+カード本文にはファイルやシンボルの実際のソースを保存する。
+
+`Explorer` は定義・参照の展開、同じシンボルの重複防止、接続の追加、
+カードの移動・削除、カーソルを基準にしたズームを扱う。
+新しいカードの寸法はソース全体を読める大きさにし、既存カードとの衝突を避けて配置する。
+crate領域にはCargo metadataのworkspaceパッケージと所属ディレクトリを用い、
+ファイル領域と合わせて表示する。workspace外のソースはプロジェクト領域にまとめる。
+セッション保存前にはモデルの不変条件を検証する。
+ソースは保存時点のスナップショットであり、読み込み時に内容を推測で再構築しない。
+
+`RustAnalyzer` はプロジェクトごとにLSPプロセスを起動し、document symbol、workspace symbol、
+definition、references、semantic tokenを独自モデルへ変換する。
+JSON-RPCのフレーミング、要求ID、サーバーからの要求、タイムアウト、終了処理は
+`language/src/transport.rs` にまとめる。外部ファイルの更新時には解析キャッシュを無効にする。
+仮想URIのマクロ展開など、ファイル上のソースに変換できない応答は明示的なエラーにする。
+
+永続化はバージョン1のJSON形式で、セッション・テーマ・設定のバージョンを個別に検査する。
+現在のバージョン以外を読み込む移行処理はまだ持たず、未対応バージョンは拒否する。
+書き込みは同じディレクトリの一時ファイルを同期してからrenameし、以前のファイルを先に削除しない。
+
 ## WorkspaceとGPUI
 
 製品workspaceはルートの `Cargo.toml` に定義する。内部依存はルートの
@@ -36,12 +61,11 @@ Canvasの状態や配置規則はUI非依存とし、ファイルの保存形式
 ルートと `xtask/` の両方の `Cargo.lock` をバージョン管理し、ゲートは `--locked` で実行する。
 
 GPUIは2026-10-01に確認したZedの `main` の最新コミット
-[`40180d9c40e2d20eb63d388bff920818f2910b53`](https://github.com/zed-industries/zed/commit/40180d9c40e2d20eb63d388bff920818f2910b53)
+[`f8c2cc844057540ca1eac7de4f19f50d7597dead`](https://github.com/zed-industries/zed/commit/f8c2cc844057540ca1eac7de4f19f50d7597dead)
 を共通依存の `rev` に固定する。同コミットのtoolchainに合わせ、Rustは `1.98.1` に固定する。
 
-空実装ではGPUIを有効にしないため、製品のビルドと構造検査にZedの取得は不要。
-UI実装を始めるときに `refscape-ui/Cargo.toml` の `[dependencies]` へ
-`gpui.workspace = true` を追加し、ルートのlockfileを更新する。
+`refscape-ui` はGPUI、`refscape-app` はプラットフォーム起動用の `gpui_platform` を
+共通依存から継承する。製品のビルドにはZedのGit取得とGPUIのOS固有依存が必要。
 更新時も最新コミットを確認して完全なSHAに固定し、常時追従するbranch指定にはしない。
 
 ## 構造検査
@@ -130,3 +154,6 @@ cargo fmt --manifest-path xtask/Cargo.toml --all
 
 xtaskの公開コマンドは `cargo xtask gate` のみとする。
 依存宣言を変更したらゲートを実行し、生成された図を含めて変更を確認する。
+
+通常のゲートは外部のrust-analyzerが必要なテストをignoreするので、
+ローカルで実行する場合はREADMEの追加テストコマンドを使う。

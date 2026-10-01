@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 refscape-application.workspace = true
 refscape-model.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
