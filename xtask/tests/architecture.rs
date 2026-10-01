@@ -9,7 +9,7 @@ use xtask::{check_architecture, dependency_graph, write_dependency_graph};
 const NAMES: &[&str] = &[
     "refscape-model",
     "refscape-application",
-    "refscape-lsp",
+    "refscape-language",
     "refscape-storage",
     "refscape-ui",
     "refscape-app",
@@ -17,7 +17,10 @@ const NAMES: &[&str] = &[
 const EDGES: &[(&str, &[&str])] = &[
     ("refscape-model", &[]),
     ("refscape-application", &["refscape-model"]),
-    ("refscape-lsp", &["refscape-application", "refscape-model"]),
+    (
+        "refscape-language",
+        &["refscape-application", "refscape-model"],
+    ),
     (
         "refscape-storage",
         &["refscape-application", "refscape-model"],
@@ -27,7 +30,7 @@ const EDGES: &[(&str, &[&str])] = &[
         "refscape-app",
         &[
             "refscape-application",
-            "refscape-lsp",
+            "refscape-language",
             "refscape-model",
             "refscape-storage",
             "refscape-ui",
@@ -447,7 +450,7 @@ fn ui_cannot_use_a_registry_gpui_instead_of_the_pinned_source() {
 }
 
 #[test]
-fn lsp_protocol_types_are_confined_to_the_adapter() {
+fn lsp_protocol_types_are_confined_to_the_language_backend() {
     let fixture = Fixture::new();
     fixture.append(
         "crates/refscape-application/Cargo.toml",

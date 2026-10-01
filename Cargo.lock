@@ -7,7 +7,7 @@ name = "refscape-app"
 version = "0.1.0"
 dependencies = [
  "refscape-application",
- "refscape-lsp",
+ "refscape-language",
  "refscape-model",
  "refscape-storage",
  "refscape-ui",
@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "refscape-lsp"
+name = "refscape-language"
 version = "0.1.0"
 dependencies = [
  "refscape-application",

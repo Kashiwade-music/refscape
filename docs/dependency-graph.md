@@ -11,18 +11,18 @@ flowchart TD
     subgraph product["Product workspace"]
         refscape_app["refscape-app"]
         refscape_application["refscape-application"]
-        refscape_lsp["refscape-lsp"]
+        refscape_language["refscape-language"]
         refscape_model["refscape-model"]
         refscape_storage["refscape-storage"]
         refscape_ui["refscape-ui"]
         refscape_app -->|"normal"| refscape_application
-        refscape_app -->|"normal"| refscape_lsp
+        refscape_app -->|"normal"| refscape_language
         refscape_app -->|"normal"| refscape_model
         refscape_app -->|"normal"| refscape_storage
         refscape_app -->|"normal"| refscape_ui
         refscape_application -->|"normal"| refscape_model
-        refscape_lsp -->|"normal"| refscape_application
-        refscape_lsp -->|"normal"| refscape_model
+        refscape_language -->|"normal"| refscape_application
+        refscape_language -->|"normal"| refscape_model
         refscape_storage -->|"normal"| refscape_application
         refscape_storage -->|"normal"| refscape_model
         refscape_ui -->|"normal"| refscape_application

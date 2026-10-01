@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 refscape-application.workspace = true
-refscape-lsp.workspace = true
+refscape-language.workspace = true
 refscape-model.workspace = true
 refscape-storage.workspace = true
 refscape-ui.workspace = true

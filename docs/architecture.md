@@ -6,7 +6,7 @@
 |---|---|---|
 | `refscape-model` | UI非依存のソース位置・シンボル・カード・接続・領域・座標・ズーム・セッション・テーマのモデルと不変条件 | なし |
 | `refscape-application` | プロジェクト開始、定義展開、カード操作、セッション保存・復元などの操作と外部機能のtrait | `model` |
-| `refscape-lsp` | LSPクライアント、サーバー管理、言語設定、プロトコル型と独自モデルの変換 | `application`, `model` |
+| `refscape-language` | 言語解析・検索・定義・参照などのバックエンド、言語設定、バックエンド固有型と独自モデルの変換 | `application`, `model` |
 | `refscape-storage` | セッション・設定・テーマの保存形式、読み書き、バージョン移行 | `application`, `model` |
 | `refscape-ui` | GPUIによるCanvas・コードカード・接続線・入力・ハイライト・テーマの描画 | `application`, `model` |
 | `refscape-app` | 実行バイナリ `refscape`、具体的なアダプターとビューの生成・接続、起動・終了処理 | 上記5 crate |
@@ -16,10 +16,12 @@
 現時点の製品crateはドキュメントと空のエントリーポイントだけで、機能の実装は含まない。
 
 `application` が `LanguageService` や `SessionRepository` といったtraitを定義し、
-`lsp` と `storage` がそれを実装する。`app` が具体的な実装を生成して渡す。
+`language` と `storage` がそれを実装する。`app` が具体的な実装を生成して渡す。
 `application` から具体的なアダプターへ依存しない。
 
-GPUIの型は `ui` と起動に必要な `app` に閉じ込め、LSPの型は `lsp` の境界で独自モデルに変換する。
+GPUIの型は `ui` と起動に必要な `app` に閉じ込め、言語バックエンド固有の型は `language` の境界で独自モデルに変換する。
+LSPは言語バックエンドの一つとし、将来はコンパイラAPIなどの公式機能を使うバックエンドも追加できる。
+バックエンドの規模が大きくなった場合は、それぞれを別crateへ分離する。
 Canvasの状態や配置規則はUI非依存とし、ファイルの保存形式と移行処理は `storage` が管理する。
 テーマの意味的な定義は `model`、保存は `storage`、描画用の型への変換は `ui` が担当する。
 コードの構造解析はREADMEの方針に従いLSP等の公式機能を利用し、未対応の機能を推測で補わない。
@@ -70,7 +72,7 @@ cargo xtask gate
 未登録のローカルpath依存や製品から `xtask` への依存も許可しない。
 `xtask` 自身も独立した単一packageのworkspaceであることと、製品・ローカルcrateに依存しないことを検査する。
 
-外部依存についてはGPUI系の直接依存を `ui` / `app`、`lsp-types` の直接依存を `lsp` に限定する。
+外部依存についてはGPUI系の直接依存を `ui` / `app`、`lsp-types` の直接依存を `language` に限定する。
 GPUI本体はZedの完全なコミットSHAで固定した共通依存の継承のみ許可する。
 検査の保証対象は製品workspaceの内部依存宣言であり、外部ライブラリ全体の循環検査ではない。
 metadata取得、manifest解析、依存先識別に失敗した場合も検査失敗とし、成功として扱わない。

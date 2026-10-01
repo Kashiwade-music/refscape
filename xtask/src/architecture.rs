@@ -4,7 +4,7 @@ use cargo_metadata::{Dependency, DependencyKind, Metadata, MetadataCommand, Pack
 
 const MODEL: &str = "refscape-model";
 const APPLICATION: &str = "refscape-application";
-const LSP: &str = "refscape-lsp";
+const LANGUAGE: &str = "refscape-language";
 const STORAGE: &str = "refscape-storage";
 const UI: &str = "refscape-ui";
 const APP: &str = "refscape-app";
@@ -13,10 +13,10 @@ const APP: &str = "refscape-app";
 const POLICY: &[(&str, &[&str])] = &[
     (MODEL, &[]),
     (APPLICATION, &[MODEL]),
-    (LSP, &[APPLICATION, MODEL]),
+    (LANGUAGE, &[APPLICATION, MODEL]),
     (STORAGE, &[APPLICATION, MODEL]),
     (UI, &[APPLICATION, MODEL]),
-    (APP, &[APPLICATION, LSP, MODEL, STORAGE, UI]),
+    (APP, &[APPLICATION, LANGUAGE, MODEL, STORAGE, UI]),
 ];
 
 struct Edge {
@@ -377,8 +377,8 @@ fn check_external_boundary(name: &str, dependency: &Dependency, violations: &mut
             "{name}: GPUI dependencies are only allowed in {UI} and {APP}"
         ));
     }
-    if dependency.name == "lsp-types" && name != LSP {
-        violations.push(format!("{name}: lsp-types is only allowed in {LSP}"));
+    if dependency.name == "lsp-types" && name != LANGUAGE {
+        violations.push(format!("{name}: lsp-types is only allowed in {LANGUAGE}"));
     }
 }
 
