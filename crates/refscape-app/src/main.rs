@@ -1,22 +1,18 @@
-//! Composition root: GPUI, rust-analyzer, and versioned JSON storage.
+//! Composition root: native UI, rust-analyzer, and versioned JSON storage.
 
 mod options;
 
 use std::{
-    cell::RefCell,
     env,
     path::Path,
     process::ExitCode,
-    rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use refscape_application::{Explorer, SessionRepository};
 use refscape_language::RustAnalyzer;
 use refscape_model::{Point, Theme};
 use refscape_storage::{JsonSessionRepository, default_session_path, load_theme, save_theme};
-use refscape_ui::ExplorerView;
 
 use options::{HELP, Options};
 
@@ -90,36 +86,7 @@ fn run() -> Result<(), String> {
             .map(default_session_path)
             .unwrap_or_default()
     });
-    let launch_error = Rc::new(RefCell::new(None));
-    let window_error = launch_error.clone();
-    gpui_platform::application().run(move |cx: &mut App| {
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
-        let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
-        if let Err(error) = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                app_id: Some("dev.refscape.Refscape".into()),
-                ..Default::default()
-            },
-            move |window, cx| {
-                window.set_window_title("Refscape");
-                cx.new(|cx| ExplorerView::new(explorer, session_path, themes, project, window, cx))
-            },
-        ) {
-            *window_error.borrow_mut() = Some(format!("cannot open window: {error}"));
-            cx.quit();
-        }
-        cx.activate(true);
-    });
-    match launch_error.borrow_mut().take() {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
+    refscape_ui::run(explorer, session_path, themes, project)
 }
 
 /// Real-backend smoke check, with a disposable session that never overwrites user work.

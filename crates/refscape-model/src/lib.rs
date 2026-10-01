@@ -189,6 +189,22 @@ pub struct CodeCard {
     pub height: f32,
 }
 
+pub const CODE_CARD_HEADER: f32 = 52.0;
+pub const CODE_LINE_HEIGHT: f32 = 20.0;
+
+impl CodeCard {
+    /// World-space height shared by painting and collision detection, including
+    /// source that outgrew the dimensions stored in an older session.
+    pub fn display_height(&self) -> f32 {
+        self.height.max(Self::source_height(&self.source))
+    }
+
+    pub fn source_height(source: &SourceDocument) -> f32 {
+        (CODE_CARD_HEADER + source.code.lines().count().max(1) as f32 * CODE_LINE_HEIGHT + 24.0)
+            .max(128.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionKind {

@@ -63,7 +63,7 @@ impl Fixture {
             .map(|name| format!("{name} = {{ path = \"crates/{name}\" }}\n"))
             .collect::<String>();
         fixture.write("Cargo.toml", &format!(
-            "[workspace]\nmembers = [{members}]\nexclude = [\"xtask\"]\nresolver = \"3\"\n\n[workspace.dependencies]\n{shared}gpui = {{ git = \"https://github.com/zed-industries/zed\", rev = \"40180d9c40e2d20eb63d388bff920818f2910b53\" }}\n"
+            "[workspace]\nmembers = [{members}]\nexclude = [\"xtask\"]\nresolver = \"3\"\n\n[workspace.dependencies]\n{shared}"
         ));
         for (name, dependencies) in EDGES {
             let dependencies = dependencies
@@ -75,6 +75,7 @@ impl Fixture {
             ));
             fixture.write(&format!("crates/{name}/src/lib.rs"), "");
         }
+        fixture.append("crates/refscape-ui/Cargo.toml", "gpui = { git = \"https://github.com/zed-industries/zed\", rev = \"40180d9c40e2d20eb63d388bff920818f2910b53\" }\n");
         fixture.write("xtask/Cargo.toml", "[package]\nname = \"xtask\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\nresolver = \"3\"\n");
         fixture.write("xtask/src/main.rs", "fn main() {}\n");
         fixture
@@ -127,6 +128,10 @@ fn graph_contains_actual_edges_and_the_isolated_xtask() {
         "",
     );
     let graph = dependency_graph(&fixture.root).unwrap();
+    let graph = graph
+        .split("## Direct external dependencies")
+        .next()
+        .unwrap();
     assert!(graph.contains("```mermaid\nflowchart TD"));
     assert!(graph.contains("refscape_model[\"refscape-model\"]"));
     assert!(graph.contains("refscape_ui -->|\"normal\"| refscape_application"));
@@ -162,6 +167,77 @@ fn graph_labels_include_inactive_conditions_and_escape_target_quotes() {
     fixture.append("crates/refscape-ui/Cargo.toml", "[target.'cfg(target_os = \"windows\")'.build-dependencies]\nrefscape-model = { workspace = true, optional = true }\n");
     let graph = dependency_graph(&fixture.root).unwrap();
     assert!(graph.contains("refscape_ui -->|\"build, optional, target=cfg(target_os = #34;windows#34;)\"| refscape_model"), "{graph}");
+}
+
+fn external_node(graph: &str, package: &str) -> String {
+    let label = format!("[\"{package}\"]");
+    graph
+        .lines()
+        .find_map(|line| line.trim().strip_suffix(&label).map(str::to_owned))
+        .unwrap_or_else(|| panic!("external package {package} missing in {graph}"))
+}
+
+#[test]
+fn external_graph_contains_direct_product_and_tooling_dependencies_with_conditions() {
+    let fixture = Fixture::new();
+    fixture.append(
+        "Cargo.toml",
+        "data = { package = \"serde\", version = \"1\" }\nunused-external = \"1\"\n",
+    );
+    fixture.append(
+        "crates/refscape-model/Cargo.toml",
+        "serde = \"1\"\n[target.'cfg(target_os = \"windows\")'.build-dependencies]\nexternal-build = { version = \"1\", optional = true }\n",
+    );
+    fixture.append(
+        "crates/refscape-storage/Cargo.toml",
+        "[dev-dependencies]\ndata.workspace = true\n",
+    );
+    fixture.append("xtask/Cargo.toml", "[dependencies]\ntoml = \"0.9\"\n");
+    let document = dependency_graph(&fixture.root).unwrap();
+    let graph = document
+        .split("## Direct external dependencies")
+        .nth(1)
+        .unwrap();
+    let serde = external_node(graph, "serde");
+    let build = external_node(graph, "external-build");
+    let toml = external_node(graph, "toml");
+    assert!(graph.contains("```mermaid\nflowchart LR"));
+    assert!(graph.contains(&format!("refscape_model -->|\"normal\"| {serde}")));
+    assert!(graph.contains(&format!(
+        "refscape_storage -->|\"dev, alias=data, workspace\"| {serde}"
+    )));
+    assert!(graph.contains(&format!(
+        "refscape_model -->|\"build, optional, target=cfg(target_os = #34;windows#34;)\"| {build}"
+    )));
+    assert!(graph.contains(&format!("xtask -->|\"normal\"| {toml}")));
+    assert_eq!(graph.matches("[\"serde\"]").count(), 1);
+    assert!(!graph.contains("unused-external"));
+    assert!(!graph.contains("refscape_storage -->|\"normal\"| refscape_model"));
+    assert!(!fixture.root.join("Cargo.lock").exists());
+}
+
+#[test]
+fn external_graph_is_reproducible_and_keeps_distinct_package_names_separate() {
+    let first = Fixture::new();
+    let second = Fixture::new();
+    first.append(
+        "crates/refscape-model/Cargo.toml",
+        "foo-bar = \"1\"\nfoo_bar = \"2\"\n",
+    );
+    second.append(
+        "crates/refscape-model/Cargo.toml",
+        "foo_bar = \"2\"\nfoo-bar = \"1\"\n",
+    );
+    let document = dependency_graph(&first.root).unwrap();
+    assert_eq!(document, dependency_graph(&second.root).unwrap());
+    let graph = document
+        .split("## Direct external dependencies")
+        .nth(1)
+        .unwrap();
+    assert_ne!(
+        external_node(graph, "foo-bar"),
+        external_node(graph, "foo_bar")
+    );
 }
 
 #[test]
@@ -439,14 +515,43 @@ fn gpui_cannot_leak_into_the_model_even_with_a_renamed_dev_dependency() {
 }
 
 #[test]
-fn ui_cannot_use_a_registry_gpui_instead_of_the_pinned_source() {
+fn gpui_platform_cannot_leak_into_the_executable_even_on_inactive_targets() {
     let fixture = Fixture::new();
-    fixture.append("crates/refscape-ui/Cargo.toml", "gpui = \"0.2\"\n");
+    fixture.append("crates/refscape-app/Cargo.toml", "[target.'cfg(unix)'.dev-dependencies]\nplatform = { package = \"gpui_platform\", version = \"0.2\" }\n");
     assert!(
         fixture
             .error()
-            .contains("gpui must inherit the pinned workspace dependency")
+            .contains("GPUI dependencies are only allowed in refscape-ui")
     );
+}
+
+#[test]
+fn unused_gpui_workspace_declarations_are_rejected_even_under_an_alias() {
+    let fixture = Fixture::new();
+    fixture.append("Cargo.toml", "gui = { package = \"gpui\", git = \"https://github.com/zed-industries/zed\", rev = \"40180d9c40e2d20eb63d388bff920818f2910b53\" }\n");
+    assert!(
+        fixture
+            .error()
+            .contains("GPUI dependencies must be declared directly in refscape-ui")
+    );
+}
+
+#[test]
+fn gpui_platform_and_core_must_use_the_same_commit() {
+    let fixture = Fixture::new();
+    fixture.append("crates/refscape-ui/Cargo.toml", "gpui_platform = { git = \"https://github.com/zed-industries/zed\", rev = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }\n");
+    assert!(
+        fixture
+            .error()
+            .contains("all GPUI dependencies must use the same pinned revision")
+    );
+}
+
+#[test]
+fn ui_cannot_use_a_registry_gpui_instead_of_the_pinned_source() {
+    let fixture = Fixture::new();
+    fixture.replace("crates/refscape-ui/Cargo.toml", "gpui = { git = \"https://github.com/zed-industries/zed\", rev = \"40180d9c40e2d20eb63d388bff920818f2910b53\" }", "gpui = \"0.2\"");
+    assert!(fixture.error().contains("GPUI must come from"));
 }
 
 #[test]
@@ -463,7 +568,7 @@ fn lsp_protocol_types_are_confined_to_the_language_backend() {
 fn floating_gpui_revision_is_rejected() {
     let fixture = Fixture::new();
     fixture.replace(
-        "Cargo.toml",
+        "crates/refscape-ui/Cargo.toml",
         "rev = \"40180d9c40e2d20eb63d388bff920818f2910b53\"",
         "rev = \"main\"",
     );

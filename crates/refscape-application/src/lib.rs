@@ -232,12 +232,14 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
         if !position.is_finite() {
             return Err("Card position must be finite".into());
         }
-        self.session
-            .cards
+        let mut cards = self.session.cards.clone();
+        cards
             .iter_mut()
             .find(|c| c.id == id)
             .ok_or_else(|| format!("Unknown card {id}"))?
             .position = position;
+        arrange_cards(&mut cards)?;
+        self.session.cards = cards;
         Ok(())
     }
 
@@ -300,12 +302,15 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
                 return Err(format!("Unknown card {id}"));
             }
         }
-        self.session.viewport = viewport;
+        let mut cards = self.session.cards.clone();
         for (id, position) in positions {
-            if let Some(card) = self.session.cards.iter_mut().find(|c| c.id == id) {
+            if let Some(card) = cards.iter_mut().find(|c| c.id == id) {
                 card.position = position;
             }
         }
+        arrange_cards(&mut cards)?;
+        self.session.viewport = viewport;
+        self.session.cards = cards;
         Ok(())
     }
 
@@ -321,8 +326,9 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
     }
 
     pub fn load_session(&mut self, path: &Path) -> Result<()> {
-        let session = self.repository.load(path)?;
+        let mut session = self.repository.load(path)?;
         session.validate()?;
+        arrange_cards(&mut session.cards)?;
         self.language.open_project(&session.project_root)?;
         let project_crates = self.language.project_crates()?;
         self.session = session;
@@ -439,7 +445,7 @@ impl From<&CodeCard> for CardRect {
         Self {
             position: card.position,
             width: card.width,
-            height: card.height,
+            height: card.display_height(),
         }
     }
 }
@@ -488,8 +494,27 @@ fn source_dimensions(source: &SourceDocument) -> (f32, f32) {
         .max()
         .unwrap_or(0);
     let width = (longest as f32 * 8.0 + 80.0).max(520.0);
-    let height = (source.code.lines().count().max(1) as f32 * 20.0 + 76.0).max(128.0);
+    let height = CodeCard::source_height(source);
     (width, height)
+}
+
+/// Preserve clear positions and move colliding cards below occupied space.
+/// Calculate every placement first so invalid geometry cannot partially reflow a canvas.
+pub fn arrange_cards(cards: &mut [CodeCard]) -> Result<()> {
+    let mut occupied = Vec::with_capacity(cards.len());
+    for card in cards.iter() {
+        occupied.push(vacant_position(
+            card.position,
+            card.width,
+            card.display_height(),
+            &occupied,
+        )?);
+    }
+    for (card, rect) in cards.iter_mut().zip(occupied) {
+        card.position = rect.position;
+        card.height = rect.height;
+    }
+    Ok(())
 }
 
 fn vacant_position(
@@ -730,6 +755,62 @@ mod tests {
             }
         }
         explorer.session.validate().unwrap();
+    }
+
+    #[test]
+    fn restore_and_canvas_sync_clear_full_source_heights_and_preserve_clear_cards() {
+        let mut original = explorer();
+        original.language.code = std::iter::repeat_n("fn tall() {}", 40)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for name in ["first", "second", "third", "clear"] {
+            original.add_symbol(symbol(name), Point::default()).unwrap();
+        }
+        // An old snapshot used a fixed height and stacked cards using that height.
+        for (index, card) in original.session.cards.iter_mut().enumerate() {
+            card.height = 128.0;
+            card.position = Point::new(0.0, index as f32 * 160.0);
+        }
+        let clear = Point::new(800.0, 20.0);
+        original.session.cards[3].position = clear;
+        let saved = original.session.clone();
+        struct Saved(Session);
+        impl SessionRepository for Saved {
+            fn save(&self, _: &Path, _: &Session) -> Result<()> {
+                Ok(())
+            }
+            fn load(&self, _: &Path) -> Result<Session> {
+                Ok(self.0.clone())
+            }
+        }
+        let mut restored = Explorer::new(original.language, Saved(saved));
+        restored
+            .load_session(Path::new("old-session.json"))
+            .unwrap();
+        let cards = &restored.session.cards;
+        assert_eq!(cards[0].position, Point::default());
+        assert_eq!(cards[0].height, 876.0);
+        assert_eq!(cards[1].position.y, 908.0);
+        assert_eq!(cards[2].position.y, 1816.0);
+        assert_eq!(cards[3].position, clear);
+        let before = cards.clone();
+        arrange_cards(&mut restored.session.cards).unwrap();
+        assert_eq!(restored.session.cards, before);
+
+        // UI movement must use the same complete rectangles before expanding/saving.
+        let positions = restored.session.cards[..3]
+            .iter()
+            .map(|card| (card.id.clone(), Point::default()))
+            .collect();
+        restored
+            .sync_canvas(Viewport::default(), positions)
+            .unwrap();
+        for (index, card) in restored.session.cards.iter().enumerate() {
+            for other in &restored.session.cards[index + 1..] {
+                assert!(!CardRect::from(card).overlaps(CardRect::from(other)));
+            }
+        }
+        assert_eq!(restored.session.cards[3].position, clear);
     }
 
     #[test]

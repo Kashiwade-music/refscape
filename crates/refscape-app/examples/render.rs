@@ -1,13 +1,11 @@
 //! Render a real GPUI scene into a PNG for visual verification.
 //! cargo run -p refscape-app --example render --features visual-tests -- PROJECT OUTPUT [light]
-use std::{env, path::PathBuf, time::Duration};
+use std::{env, path::PathBuf};
 
-use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use refscape_application::Explorer;
 use refscape_language::RustAnalyzer;
 use refscape_model::{Point, Theme};
 use refscape_storage::JsonSessionRepository;
-use refscape_ui::ExplorerView;
 
 fn main() {
     let mut args = env::args_os().skip(1);
@@ -77,53 +75,5 @@ fn main() {
         explorer.session().cards.len(),
         main_path.display()
     );
-    gpui_platform::application().run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
-        let handle = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    show: false,
-                    focus: false,
-                    ..Default::default()
-                },
-                |window, cx| {
-                    cx.new(|cx| {
-                        ExplorerView::new(
-                            explorer,
-                            root.join(".refscape/session.json"),
-                            vec![],
-                            None,
-                            window,
-                            cx,
-                        )
-                    })
-                },
-            )
-            .unwrap();
-        cx.update_window(handle.into(), |_, window, _| {
-            window.resize(size(px(1440.), px(900.)))
-        })
-        .unwrap();
-        cx.spawn(async move |cx| {
-            // Let the native resize event initialize the DirectX render target.
-            cx.background_executor()
-                .timer(Duration::from_millis(800))
-                .await;
-            cx.update_window(handle.into(), |_, window, cx| {
-                let arena = window.draw(cx);
-                let image = window.render_to_image().expect("GPU rendering failed");
-                assert!(
-                    image.width() >= 1000 && image.height() >= 600,
-                    "native window has not resized"
-                );
-                image.save(&output).expect("PNG write failed");
-                arena.clear(cx);
-                println!("Saved {}", output.display());
-            })
-            .unwrap();
-            cx.update(|cx| cx.quit());
-        })
-        .detach();
-    });
+    refscape_ui::render_snapshot(explorer, root.join(".refscape/session.json"), output).unwrap();
 }

@@ -17,8 +17,10 @@ impl LanguageService for Language {
     fn symbols(&mut self, _: &Path) -> Result<Vec<Symbol>, String> {
         Ok(vec![])
     }
-    fn source(&mut self, _: &Symbol) -> Result<SourceDocument, String> {
-        Ok(self.source.clone())
+    fn source(&mut self, symbol: &Symbol) -> Result<SourceDocument, String> {
+        let mut source = self.source.clone();
+        source.symbol = symbol.clone();
+        Ok(source)
     }
     fn definitions(&mut self, _: &Path, position: Position) -> Result<Vec<Symbol>, String> {
         self.requests.lock().unwrap().push(position);
@@ -288,4 +290,127 @@ fn definition_and_reference_edges_start_at_rendered_word_underlines(cx: &mut Tes
         assert!(code_connections(&session, Bounds::default(), window).is_empty());
     })
     .unwrap();
+}
+
+#[gpui::test]
+fn dropping_tall_cards_clears_their_rendered_bottoms_at_every_zoom(cx: &mut TestAppContext) {
+    let (explorer, _) = fixture();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        ExplorerView::new(
+            explorer,
+            PathBuf::from("session.json"),
+            vec![],
+            None,
+            window,
+            cx,
+        )
+    });
+    let handle = cx.window_handle();
+    for zoom in [0.75, 1.0, 1.5] {
+        view.update(cx, |view, cx| {
+            let mut first = view.session.cards[0].clone();
+            first.source.code = std::iter::repeat_n("fn source() {}", 12)
+                .collect::<Vec<_>>()
+                .join("\n");
+            first.height = 128.0;
+            first.position = Point::new(20.0, 10.0);
+            let mut second = first.clone();
+            second.id = "second".into();
+            second.position.y = 170.0;
+            let mut third = first.clone();
+            third.id = "third".into();
+            third.position.y = 330.0;
+            view.session.cards = vec![first, second, third];
+            view.session.viewport.zoom = zoom;
+            view.session.viewport.offset = Point::new(13.0, 27.0);
+            view.drag = Some(Drag::Card(
+                "second".into(),
+                point(px(0.0), px(0.0)),
+                Point::new(20.0, 170.0),
+            ));
+            view.finish_drag(cx);
+        });
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        view.read_with(cx, |view, _| {
+            assert!(view.drag.is_none());
+            let rects: Vec<_> = view
+                .session
+                .cards
+                .iter()
+                .map(|card| card_bounds(card, &view.session, view.bounds))
+                .collect();
+            for pair in rects.windows(2) {
+                assert!(f32::from(pair[1].top() - pair[0].bottom()) >= 32.0 * zoom - 0.001);
+            }
+            for painted in &view.painted {
+                let last_line_bottom =
+                    painted.origin.y + px(painted.lines.len() as f32 * LINE * zoom);
+                assert!(painted.bounds.bottom() >= last_line_bottom + px(16.0 * zoom));
+                let card = view
+                    .session
+                    .cards
+                    .iter()
+                    .find(|card| card.id == painted.id)
+                    .unwrap();
+                assert_eq!(painted.bounds.size.height, px(card.height * zoom));
+            }
+        });
+    }
+}
+
+#[gpui::test]
+fn cards_moved_during_a_request_do_not_overlap_new_cards_on_completion(cx: &mut TestAppContext) {
+    let (explorer, _) = fixture();
+    let mut target = explorer.session().cards[0].source.symbol.clone();
+    target.id = "new-target".into();
+    target.path = "target.rs".into();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        ExplorerView::new(explorer, "session.json".into(), vec![], None, window, cx)
+    });
+    view.update(cx, |view, cx| {
+        view.run_job(
+            "Opening target",
+            Box::new(move |explorer| {
+                explorer.add_symbol(target, Point::new(800.0, 50.0))?;
+                Ok(Output::default())
+            }),
+            cx,
+        );
+        // The worker planned against the old position before the pointer moved.
+        view.drag = Some(Drag::Card(
+            view.session.cards[0].id.clone(),
+            point(px(0.0), px(0.0)),
+            view.session.cards[0].position,
+        ));
+        view.mouse_move(
+            &MouseMoveEvent {
+                position: point(px(700.0), px(0.0)),
+                ..Default::default()
+            },
+            cx,
+        );
+        view.finish_drag(cx);
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert!(!view.error);
+        assert_eq!(view.session.cards.len(), 2);
+        assert_eq!(view.session.cards[0].position, Point::new(800.0, 50.0));
+        let source = card_bounds(&view.session.cards[0], &view.session, view.bounds);
+        let target = card_bounds(&view.session.cards[1], &view.session, view.bounds);
+        assert!(f32::from(target.top() - source.bottom()) >= 32.0);
+    });
+    // A failing request also merges the current UI positions, then clears overlap.
+    view.update(cx, |view, cx| {
+        view.search(cx);
+        view.session.cards[0].position = view.session.cards[1].position;
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert!(view.error);
+        let source = card_bounds(&view.session.cards[0], &view.session, view.bounds);
+        let target = card_bounds(&view.session.cards[1], &view.session, view.bounds);
+        assert!(f32::from(target.top() - source.bottom()) >= 32.0);
+    });
 }

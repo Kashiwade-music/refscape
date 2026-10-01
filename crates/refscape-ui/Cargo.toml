@@ -5,13 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+visual-tests = ["gpui/test-support", "gpui_platform/test-support"]
+
 [dependencies]
-gpui.workspace = true
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f8c2cc844057540ca1eac7de4f19f50d7597dead" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f8c2cc844057540ca1eac7de4f19f50d7597dead", features = ["font-kit", "x11", "wayland"] }
 refscape-application.workspace = true
 refscape-model.workspace = true
 
 [dev-dependencies]
-gpui = { workspace = true, features = ["test-support"] }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f8c2cc844057540ca1eac7de4f19f50d7597dead", features = ["test-support"] }
 
 [lints]
 workspace = true

@@ -1,5 +1,9 @@
 //! Native spatial explorer; language and persistence operations run off the UI thread.
 mod input;
+mod runtime;
+#[cfg(feature = "visual-tests")]
+pub use runtime::render_snapshot;
+pub use runtime::run;
 #[cfg(test)]
 mod tests;
 
@@ -9,16 +13,18 @@ use gpui::{
     ScrollWheelEvent, ShapedLine, TextAlign, TextRun, Window, canvas, div, fill, point, prelude::*,
     px, quad, rgb, size,
 };
-use refscape_application::{Explorer, LanguageService, SessionRepository};
-use refscape_model::{CodeCard, Palette, Point, Position, Session, Symbol, Theme};
+use refscape_application::{Explorer, LanguageService, SessionRepository, arrange_cards};
+use refscape_model::{
+    CODE_CARD_HEADER, CODE_LINE_HEIGHT, CodeCard, Palette, Point, Position, Session, Symbol, Theme,
+};
 use std::{
     ops::Range,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
 
-const HEADER: f32 = 52.0;
-const LINE: f32 = 20.0;
+const HEADER: f32 = CODE_CARD_HEADER;
+const LINE: f32 = CODE_LINE_HEIGHT;
 type Job<L, R> = Box<dyn FnOnce(&mut Explorer<L, R>) -> Result<Output, String> + Send>;
 #[derive(Default)]
 struct Output {
@@ -50,7 +56,7 @@ enum Drag {
 }
 
 /// GPUI view constructed by the composition root with concrete adapters.
-pub struct ExplorerView<L: LanguageService + 'static, R: SessionRepository + 'static> {
+struct ExplorerView<L: LanguageService + 'static, R: SessionRepository + 'static> {
     explorer: Arc<Mutex<Explorer<L, R>>>,
     session: Session,
     session_path: PathBuf,
@@ -77,7 +83,7 @@ pub struct ExplorerView<L: LanguageService + 'static, R: SessionRepository + 'st
 
 impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<L, R> {
     /// Indexing and initial session restoration begin after the window is created.
-    pub fn new(
+    fn new(
         explorer: Explorer<L, R>,
         session_path: PathBuf,
         custom_themes: Vec<Theme>,
@@ -85,7 +91,8 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let session = explorer.session().clone();
+        let mut session = explorer.session().clone();
+        let layout_error = arrange_cards(&mut session.cards).err();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mut themes = vec![Theme::dark(), Theme::light()];
@@ -118,6 +125,10 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             closing: false,
             autosave: true,
         };
+        if let Some(error) = layout_error {
+            view.status = error;
+            view.error = true;
+        }
         let weak = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             weak.update(cx, |view, cx| view.close(window, cx))
@@ -214,6 +225,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                             )
                         });
                         view.error = false;
+                        view.arrange_canvas();
                     }
                     Ok((Err(error), mut session)) => {
                         if session.project_root == view.session.project_root {
@@ -227,6 +239,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                             }
                         }
                         view.session = session;
+                        view.arrange_canvas();
                         view.status = error;
                         view.error = true;
                     }
@@ -665,6 +678,20 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         }
         cx.notify();
     }
+
+    fn arrange_canvas(&mut self) {
+        if let Err(error) = arrange_cards(&mut self.session.cards) {
+            self.status = error;
+            self.error = true;
+        }
+    }
+
+    fn finish_drag(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.drag.take(), Some(Drag::Card(..))) {
+            self.arrange_canvas();
+        }
+        cx.notify();
+    }
     fn scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
         if self.closing {
             return;
@@ -967,22 +994,19 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|v, _, _, cx| {
-                    v.drag = None;
-                    cx.notify();
+                    v.finish_drag(cx);
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|v, _, _, cx| {
-                    v.drag = None;
-                    cx.notify();
+                    v.finish_drag(cx);
                 }),
             )
             .on_mouse_up(
                 MouseButton::Middle,
                 cx.listener(|v, _, _, cx| {
-                    v.drag = None;
-                    cx.notify();
+                    v.finish_drag(cx);
                 }),
             )
             .on_scroll_wheel(cx.listener(|v, e, _, cx| v.scroll(e, cx)))
@@ -1104,8 +1128,7 @@ fn text(
     );
 }
 fn card_height(card: &CodeCard) -> f32 {
-    card.height
-        .max(HEADER + card.source.code.lines().count() as f32 * LINE + 24.0)
+    card.display_height()
 }
 fn card_bounds(card: &CodeCard, session: &Session, canvas: Bounds<Pixels>) -> Bounds<Pixels> {
     let position = session.viewport.world_to_screen(card.position);
