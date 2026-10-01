@@ -111,6 +111,19 @@ pub struct SourceDocument {
 }
 
 impl SourceDocument {
+    /// Classification comes from semantic tokens supplied by the language backend.
+    pub fn variable_token(&self, position: Position) -> Option<&SemanticToken> {
+        self.tokens.iter().find(|token| {
+            token.line == position.line
+                && token.start <= position.character
+                && token
+                    .start
+                    .checked_add(token.length)
+                    .is_some_and(|end| position.character < end)
+                && matches!(token.kind.as_str(), "variable" | "parameter" | "property")
+        })
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.symbol.validate()?;
         if self
@@ -191,6 +204,8 @@ pub struct CodeCard {
 
 pub const CODE_CARD_HEADER: f32 = 52.0;
 pub const CODE_LINE_HEIGHT: f32 = 20.0;
+pub const CODE_REGION_PADDING: f32 = 22.0;
+pub const CODE_REGION_HEADER: f32 = 36.0;
 
 impl CodeCard {
     /// World-space height shared by painting and collision detection, including
@@ -209,6 +224,7 @@ impl CodeCard {
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionKind {
     Definition,
+    TypeDefinition,
     Reference,
 }
 

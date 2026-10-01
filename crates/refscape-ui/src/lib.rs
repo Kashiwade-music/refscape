@@ -2,9 +2,9 @@
 mod hover;
 mod input;
 mod runtime;
-#[cfg(feature = "visual-tests")]
-pub use runtime::render_snapshot;
 pub use runtime::run;
+#[cfg(feature = "visual-tests")]
+pub use runtime::{render_snapshot, render_snapshot_with_selection};
 #[cfg(test)]
 mod tests;
 
@@ -14,10 +14,12 @@ use gpui::{
     ScrollWheelEvent, ShapedLine, TextAlign, TextRun, Window, canvas, div, fill, point, prelude::*,
     px, quad, rgb, size,
 };
-use refscape_application::{Explorer, LanguageService, SessionRepository, arrange_cards};
+use refscape_application::{
+    Explorer, LanguageService, SessionRepository, VariableInspection, arrange_cards,
+};
 use refscape_model::{
-    CODE_CARD_HEADER, CODE_LINE_HEIGHT, CodeCard, ConnectionKind, Palette, Point, Position,
-    Session, Symbol, Theme,
+    CODE_CARD_HEADER, CODE_LINE_HEIGHT, CODE_REGION_HEADER, CODE_REGION_PADDING, CodeCard,
+    ConnectionKind, Palette, Point, Position, Session, Symbol, Theme,
 };
 use std::{
     ops::Range,
@@ -36,6 +38,8 @@ struct Output {
     message: Option<String>,
     session_path: Option<PathBuf>,
     protect_session: bool,
+    inspection: Option<(u64, VariableInspection)>,
+    error: bool,
 }
 struct PaintedCard {
     id: String,
@@ -81,6 +85,11 @@ struct ExplorerView<L: LanguageService + 'static, R: SessionRepository + 'static
     hover_target: Option<hover::HoverTarget>,
     hover_text: Option<String>,
     hover_task: Option<gpui::Task<()>>,
+    hover_dismiss_task: Option<gpui::Task<()>>,
+    hover_pending_target: Option<hover::HoverTarget>,
+    hover_scroll: gpui::ScrollHandle,
+    inspection: Option<VariableInspection>,
+    selection_generation: u64,
     bounds: Bounds<Pixels>,
     closing: bool,
     autosave: bool,
@@ -129,6 +138,11 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             hover_target: None,
             hover_text: None,
             hover_task: None,
+            hover_dismiss_task: None,
+            hover_pending_target: None,
+            hover_scroll: gpui::ScrollHandle::new(),
+            inspection: None,
+            selection_generation: 0,
             bounds: Bounds::default(),
             closing: false,
             autosave: true,
@@ -209,6 +223,11 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                             }
                         }
                         view.session = session;
+                        if let Some((generation, inspection)) = output.inspection
+                            && generation == view.selection_generation
+                        {
+                            view.inspection = Some(inspection);
+                        }
                         if !view.themes.contains(&view.session.theme) {
                             view.themes.push(view.session.theme.clone());
                         }
@@ -223,6 +242,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                             view.autosave = !output.protect_session;
                         }
                         if output.reset {
+                            view.clear_inspection();
                             view.symbols.clear();
                             view.query.clear();
                             view.query_selection = 0..0;
@@ -237,7 +257,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                                 view.session.connections.len()
                             )
                         });
-                        view.error = false;
+                        view.error = output.error;
                         view.arrange_canvas();
                     }
                     Ok((Err(error), mut session)) => {
@@ -517,6 +537,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
     }
     fn remove_selected(&mut self, cx: &mut Context<Self>) {
         if let Some(id) = self.selected.take() {
+            self.clear_inspection();
             self.run_job(
                 "Removing card…",
                 Box::new(move |explorer| {
@@ -635,8 +656,21 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                             0
                         },
                 );
+                if self.busy {
+                    return;
+                }
+                let direct_definition = event.modifiers.alt && !references;
                 let kind = if references {
                     ConnectionKind::Reference
+                } else if !direct_definition
+                    && self
+                        .session
+                        .cards
+                        .iter()
+                        .find(|card| card.id == id)
+                        .is_some_and(|card| card.source.variable_token(position).is_some())
+                {
+                    ConnectionKind::TypeDefinition
                 } else {
                     ConnectionKind::Definition
                 };
@@ -660,26 +694,52 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                             .map(|edge| edge.source)
                     })
                     .unwrap_or(position);
+                self.clear_inspection();
+                let generation = self.selection_generation;
                 self.run_job(
                     if references {
                         "Finding references…"
+                    } else if kind == ConnectionKind::TypeDefinition {
+                        "Finding variable uses and type…"
                     } else {
                         "Finding definitions…"
                     },
                     Box::new(move |explorer| {
-                        let found = if references {
-                            explorer.toggle_references(&id, position)?
+                        let inspection = if kind == ConnectionKind::TypeDefinition {
+                            explorer.inspect_variable(&id, position)?
                         } else {
-                            explorer.toggle_definition(&id, position)?
+                            None
+                        };
+                        let found = if references {
+                            explorer.toggle_references(&id, position)
+                        } else if let Some(inspection) = &inspection {
+                            explorer.toggle_type_definition(&id, inspection.position)
+                        } else {
+                            explorer.toggle_definition(&id, position)
+                        };
+                        let found = match found {
+                            Ok(found) => found,
+                            Err(error) if inspection.is_some() => return Ok(Output {
+                                inspection: inspection.map(|inspection| (generation, inspection)),
+                                message: Some(format!("Variable highlighted; cannot expand its type: {error}")),
+                                error: true,
+                                ..Default::default()
+                            }),
+                            Err(error) => return Err(error),
                         };
                         Ok(Output {
                             message: if found.as_ref().is_some_and(Vec::is_empty) {
                                 Some(
-                                    "rust-analyzer returned no locations for this position.".into(),
+                                    if inspection.is_some() {
+                                        "Variable highlighted; this type has no source definition to expand.".into()
+                                    } else {
+                                        "rust-analyzer returned no locations for this position.".into()
+                                    },
                                 )
                             } else {
                                 None
                             },
+                            inspection: inspection.map(|inspection| (generation, inspection)),
                             ..Default::default()
                         })
                     }),
@@ -690,10 +750,16 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             return;
         }
         self.selected = None;
+        self.clear_inspection();
         if !references {
             self.drag = Some(Drag::Pan(event.position));
         }
         cx.notify();
+    }
+
+    fn clear_inspection(&mut self) {
+        self.inspection = None;
+        self.selection_generation = self.selection_generation.wrapping_add(1);
     }
     fn mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         if self.closing {
@@ -806,6 +872,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         match key {
             "escape" => {
                 self.clear_hover(cx);
+                self.clear_inspection();
                 self.search_focus = false;
                 self.drag = None;
                 cx.notify();
@@ -1026,7 +1093,12 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                     let title = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
                     div().id(("file", index)).p_2().text_size(px(11.0)).rounded_md().cursor_pointer().hover(|style| style.bg(color(&palette.surface_alt))).child(title).on_click(cx.listener(move |v, _, _, cx| v.add_file(path.clone(), cx)))
                 })))
-            .child(div().text_size(px(10.0)).text_color(color(&palette.muted)).child("Click source: definition\nRight-click: references\nDrag header: move card\nDrag canvas / wheel: pan\nCtrl + wheel: zoom\nCtrl + S: save · Delete: remove"));
+            .child(div().text_size(px(10.0)).text_color(color(&palette.muted)).child("Click variable: highlight + type\nClick function / type: definition\nAlt + click: definition\nRight-click: references\nEsc: clear highlight\nDrag header: move card\nDrag canvas / wheel: pan\nCtrl + wheel: zoom\nCtrl + S: save · Delete: remove"))
+            .children(self.inspection.as_ref().and_then(|inspection| inspection.description.as_ref()).map(|description| {
+                div().mt_3().p_2().rounded_md().bg(color(&palette.surface_alt))
+                    .text_size(px(11.0)).child(description.lines().take(6).collect::<Vec<_>>().join("\n"))
+            }));
+        let inspection = self.inspection.clone();
         let workspace = div()
             .id("canvas")
             .relative()
@@ -1052,7 +1124,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
             .on_mouse_move(cx.listener(|v, e, _, cx| v.mouse_move(e, cx)))
             .on_hover(cx.listener(|v, hovered, _, cx| {
                 if !hovered {
-                    v.clear_hover(cx);
+                    v.dismiss_hover(cx);
                 }
             }))
             .on_mouse_up(
@@ -1078,8 +1150,14 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                 canvas(
                     move |_, _, _| {},
                     move |bounds, _, window, cx| {
-                        let painted =
-                            paint_canvas(&session, selected.as_deref(), bounds, window, cx);
+                        let painted = paint_canvas(
+                            &session,
+                            selected.as_deref(),
+                            inspection.as_ref(),
+                            bounds,
+                            window,
+                            cx,
+                        );
                         entity.update(cx, |v, _| {
                             v.painted = painted;
                             v.bounds = bounds;
@@ -1322,9 +1400,85 @@ fn code_connections(
         })
         .collect()
 }
+fn card_title(session: &Session, card: &CodeCard) -> String {
+    let mut variables = Vec::new();
+    for edge in session
+        .connections
+        .iter()
+        .filter(|edge| edge.to == card.id && edge.kind == ConnectionKind::TypeDefinition)
+    {
+        let Some(origin) = session.cards.iter().find(|origin| origin.id == edge.from) else {
+            continue;
+        };
+        if let Some((row, span)) = connected_word(origin, edge.source)
+            && let Some(line) = origin.source.code.lines().nth(row)
+        {
+            let name = line[span].to_string();
+            if !variables.contains(&name) {
+                variables.push(name);
+            }
+        }
+    }
+    if variables.is_empty() {
+        card.source.symbol.name.clone()
+    } else {
+        format!("{} → {}", variables.join(", "), card.source.symbol.name)
+    }
+}
+
+/// Intersect absolute UTF-16 ranges with an excerpt's displayed line.
+fn variable_highlight_spans(
+    card: &CodeCard,
+    row: usize,
+    inspection: Option<&VariableInspection>,
+) -> Vec<Range<usize>> {
+    let Some(inspection) =
+        inspection.filter(|inspection| inspection.path == card.source.symbol.path)
+    else {
+        return Vec::new();
+    };
+    let Some(text) = card.source.code.lines().nth(row) else {
+        return Vec::new();
+    };
+    let line = card.source.symbol.range.start.line + row as u32;
+    let first_character = if row == 0 {
+        card.source.symbol.range.start.character
+    } else {
+        0
+    };
+    let last_character = first_character + text.encode_utf16().count() as u32;
+    inspection
+        .highlights
+        .iter()
+        .filter_map(|range| {
+            if line < range.start.line || line > range.end.line {
+                return None;
+            }
+            let start = if line == range.start.line {
+                range.start.character.max(first_character)
+            } else {
+                first_character
+            };
+            let end = if line == range.end.line {
+                range.end.character.min(last_character)
+            } else {
+                last_character
+            };
+            if start >= end {
+                return None;
+            }
+            Some(
+                refscape_model::utf16_byte_offset(text, start - first_character)?
+                    ..refscape_model::utf16_byte_offset(text, end - first_character)?,
+            )
+        })
+        .collect()
+}
+
 fn paint_canvas(
     session: &Session,
     selected: Option<&str>,
+    inspection: Option<&VariableInspection>,
     bounds: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
@@ -1365,22 +1519,22 @@ fn paint_canvas(
             .iter()
             .map(|r| f32::from(r.left()))
             .fold(f32::INFINITY, f32::min)
-            - 22.0 * zoom;
+            - CODE_REGION_PADDING * zoom;
         let top = rects
             .iter()
             .map(|r| f32::from(r.top()))
             .fold(f32::INFINITY, f32::min)
-            - 36.0 * zoom;
+            - CODE_REGION_HEADER * zoom;
         let right = rects
             .iter()
             .map(|r| f32::from(r.right()))
             .fold(f32::NEG_INFINITY, f32::max)
-            + 22.0 * zoom;
+            + CODE_REGION_PADDING * zoom;
         let bottom = rects
             .iter()
             .map(|r| f32::from(r.bottom()))
             .fold(f32::NEG_INFINITY, f32::max)
-            + 22.0 * zoom;
+            + CODE_REGION_PADDING * zoom;
         window.paint_quad(quad(
             Bounds::new(
                 point(px(left), px(top)),
@@ -1450,7 +1604,7 @@ fn paint_canvas(
         let (origin, lines) =
             window.with_content_mask(Some(gpui::ContentMask { bounds: rect }), |window| {
                 text(
-                    card.source.symbol.name.clone(),
+                    card_title(session, card),
                     point(rect.left() + px(16.0 * zoom), rect.top() + px(8.0 * zoom)),
                     (13.0 * zoom).max(9.0),
                     color(&palette.text),
@@ -1505,6 +1659,19 @@ fn paint_canvas(
                             None,
                         );
                         if y + px(LINE * zoom) >= bounds.top() && y < bounds.bottom() {
+                            for span in variable_highlight_spans(card, index, inspection) {
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        point(origin.x + line.x_for_index(span.start), y),
+                                        size(
+                                            line.x_for_index(span.end)
+                                                - line.x_for_index(span.start),
+                                            px(LINE * zoom),
+                                        ),
+                                    ),
+                                    color(&palette.accent).opacity(0.22),
+                                ));
+                            }
                             text(
                                 format!(
                                     "{}",

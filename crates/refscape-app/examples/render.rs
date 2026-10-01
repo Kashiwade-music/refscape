@@ -1,5 +1,5 @@
 //! Render a real GPUI scene into a PNG for visual verification.
-//! cargo run -p refscape-app --example render --features visual-tests -- PROJECT OUTPUT [light]
+//! cargo run -p refscape-app --example render --features visual-tests -- PROJECT OUTPUT [light] [variable]
 use std::{env, path::PathBuf};
 
 use refscape_application::Explorer;
@@ -13,7 +13,9 @@ fn main() {
         .canonicalize()
         .unwrap();
     let output = PathBuf::from(args.next().expect("OUTPUT required"));
-    let theme = if args.next().is_some_and(|s| s == "light") {
+    let options: Vec<_> = args.collect();
+    let variable = options.iter().any(|s| s == "variable");
+    let theme = if options.iter().any(|s| s == "light") {
         Theme::light()
     } else {
         Theme::dark()
@@ -40,11 +42,16 @@ fn main() {
         .tokens
         .iter()
         .find(|token| {
-            token.kind == "function" && token.line > card.source.symbol.selection_range.start.line
+            token.kind == if variable { "variable" } else { "function" }
+                && token.line > card.source.symbol.selection_range.start.line
         })
         .map(|token| refscape_model::Position::new(token.line, token.start));
     if let Some(call) = call {
-        explorer.expand_definition(&id, call).unwrap();
+        if variable {
+            explorer.toggle_type_definition(&id, call).unwrap();
+        } else {
+            explorer.expand_definition(&id, call).unwrap();
+        }
     }
     let cards = &explorer.session().cards;
     let left = cards
@@ -75,5 +82,15 @@ fn main() {
         explorer.session().cards.len(),
         main_path.display()
     );
-    refscape_ui::render_snapshot(explorer, root.join(".refscape/session.json"), output).unwrap();
+    refscape_ui::render_snapshot_with_selection(
+        explorer,
+        root.join(".refscape/session.json"),
+        output,
+        if variable {
+            call.map(|call| (id, call))
+        } else {
+            None
+        },
+    )
+    .unwrap();
 }

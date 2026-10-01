@@ -150,17 +150,14 @@ impl RustAnalyzer {
         &mut self,
         path: &Path,
         position: Position,
-        references: bool,
+        method: &str,
     ) -> Result<Vec<Symbol>, String> {
         let (_, uri, text) = self.open_document(path)?;
         byte_offset(&text, position)?;
         let mut params = json!({"textDocument":{"uri":uri},"position":position});
-        let method = if references {
+        if method == "textDocument/references" {
             params["context"] = json!({"includeDeclaration":false});
-            "textDocument/references"
-        } else {
-            "textDocument/definition"
-        };
+        }
         let values = self.client()?.request(method, params)?;
         let locations = if values.is_null() {
             vec![]
@@ -238,6 +235,8 @@ impl LanguageService for RustAnalyzer {
                 "textDocument":{
                     "documentSymbol":{"hierarchicalDocumentSymbolSupport":true},
                     "definition":{"linkSupport":true},
+                    "typeDefinition":{"linkSupport":true},
+                    "documentHighlight":{},
                     "hover":{"contentFormat":["plaintext"]},
                     "semanticTokens":{"requests":{"full":true},"tokenTypes":["namespace","type","class","enum","interface","struct","typeParameter","parameter","variable","property","enumMember","event","function","method","macro","keyword","modifier","comment","string","number","regexp","operator","decorator"],"tokenModifiers":["declaration","definition","readonly","static","deprecated","abstract","async","modification","documentation","defaultLibrary"],"formats":["relative"],"overlappingTokenSupport":false,"multilineTokenSupport":false}
                 },
@@ -335,11 +334,41 @@ impl LanguageService for RustAnalyzer {
     }
 
     fn definitions(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>, String> {
-        self.navigate(path, position, false)
+        self.navigate(path, position, "textDocument/definition")
     }
 
     fn references(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>, String> {
-        self.navigate(path, position, true)
+        self.navigate(path, position, "textDocument/references")
+    }
+
+    fn type_definitions(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>, String> {
+        self.navigate(path, position, "textDocument/typeDefinition")
+    }
+
+    fn document_highlights(
+        &mut self,
+        path: &Path,
+        position: Position,
+    ) -> Result<Vec<SourceRange>, String> {
+        let (_, uri, text) = self.open_document(path)?;
+        byte_offset(&text, position)?;
+        let value = self.client()?.request(
+            "textDocument/documentHighlight",
+            json!({"textDocument":{"uri":uri},"position":position}),
+        )?;
+        if value.is_null() {
+            return Ok(Vec::new());
+        }
+        value
+            .as_array()
+            .ok_or("Invalid document highlights from rust-analyzer")?
+            .iter()
+            .map(|highlight| {
+                let range = decode::<SourceRange>(&highlight["range"])?;
+                range.validate()?;
+                Ok(range)
+            })
+            .collect()
     }
 }
 

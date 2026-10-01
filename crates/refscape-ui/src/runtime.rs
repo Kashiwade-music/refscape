@@ -3,6 +3,8 @@ use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use refscape_application::{Explorer, LanguageService, SessionRepository};
+#[cfg(feature = "visual-tests")]
+use refscape_model::Position;
 use refscape_model::Theme;
 
 use crate::ExplorerView;
@@ -53,6 +55,24 @@ pub fn render_snapshot<L: LanguageService + 'static, R: SessionRepository + 'sta
     session_path: PathBuf,
     output: PathBuf,
 ) -> Result<(), String> {
+    render_snapshot_with_selection(explorer, session_path, output, None)
+}
+
+/// Render a selected variable as well as its expanded type cards.
+#[cfg(feature = "visual-tests")]
+pub fn render_snapshot_with_selection<
+    L: LanguageService + 'static,
+    R: SessionRepository + 'static,
+>(
+    mut explorer: Explorer<L, R>,
+    session_path: PathBuf,
+    output: PathBuf,
+    selection: Option<(String, Position)>,
+) -> Result<(), String> {
+    let inspection = match &selection {
+        Some((id, position)) => explorer.inspect_variable(id, *position)?,
+        None => None,
+    };
     let result = Rc::new(RefCell::new(Ok(())));
     let window_result = result.clone();
     gpui_platform::application().run(move |cx: &mut App| {
@@ -65,7 +85,13 @@ pub fn render_snapshot<L: LanguageService + 'static, R: SessionRepository + 'sta
                 ..Default::default()
             },
             |window, cx| {
-                cx.new(|cx| ExplorerView::new(explorer, session_path, vec![], None, window, cx))
+                cx.new(|cx| {
+                    let mut view =
+                        ExplorerView::new(explorer, session_path, vec![], None, window, cx);
+                    view.inspection = inspection;
+                    view.selected = selection.map(|(id, _)| id);
+                    view
+                })
             },
         ) {
             Ok(handle) => handle,

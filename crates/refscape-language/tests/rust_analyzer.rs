@@ -9,6 +9,96 @@ use std::{
 
 #[test]
 #[ignore = "requires rust-analyzer; run cargo test -p refscape-language --test rust_analyzer -- --ignored"]
+fn real_server_resolves_inferred_variable_types_and_scope_aware_highlights() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = env::temp_dir().join(format!("refscape-variable-{}-{unique}", std::process::id()));
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("Cargo.toml"), "[package]\nname = \"refscape_variable_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n").unwrap();
+    let code = "mod config;\nuse config::Config;\npub fn entry(config: Config) -> u32 {\n    let value = config;\n    let _first = &value;\n    {\n        let value = 7u32;\n        let _second = value;\n    }\n    let _last = &value;\n    42\n}\n";
+    let lib = root.join("src/lib.rs");
+    fs::write(&lib, code).unwrap();
+    fs::write(
+        root.join("src/config.rs"),
+        "pub struct Config {\n    pub count: u32,\n}\n",
+    )
+    .unwrap();
+    let at = |line: u32, word: &str| {
+        let text = code.lines().nth(line as usize).unwrap();
+        let byte = text.find(word).unwrap();
+        Position::new(line, text[..byte].encode_utf16().count() as u32)
+    };
+    let range = |line: u32, word: &str| {
+        let start = at(line, word);
+        SourceRange {
+            start,
+            end: Position::new(line, start.character + word.encode_utf16().count() as u32),
+        }
+    };
+    let mut language = RustAnalyzer::default().with_timeout(Duration::from_secs(30));
+    language.open_project(&root).unwrap();
+    let file = language
+        .source(&Symbol::file(lib.clone(), SourceRange::default()))
+        .unwrap();
+    assert!(file.variable_token(at(4, "value")).is_some());
+    assert!(file.variable_token(at(2, "config")).is_some());
+    assert!(file.variable_token(at(2, "entry")).is_none());
+    let types = language.type_definitions(&lib, at(4, "value")).unwrap();
+    assert_eq!(types.len(), 1);
+    assert_eq!(types[0].name, "Config");
+    assert_eq!(
+        types[0].path,
+        root.join("src/config.rs").canonicalize().unwrap()
+    );
+    assert!(
+        language
+            .source(&types[0])
+            .unwrap()
+            .code
+            .contains("pub count: u32")
+    );
+    let highlights = language.document_highlights(&lib, at(4, "value")).unwrap();
+    assert!(highlights.contains(&range(3, "value")), "{highlights:?}");
+    assert!(highlights.contains(&range(4, "value")), "{highlights:?}");
+    assert!(highlights.contains(&range(9, "value")), "{highlights:?}");
+    assert!(
+        !highlights
+            .iter()
+            .any(|range| matches!(range.start.line, 6 | 7)),
+        "{highlights:?}"
+    );
+    let hover = language.hover(&lib, at(4, "value")).unwrap().unwrap();
+    assert!(hover.contains("Config"), "{hover}");
+    assert!(
+        language
+            .type_definitions(&lib, at(7, "value"))
+            .unwrap()
+            .is_empty()
+    );
+    let primitive = language.document_highlights(&lib, at(7, "value")).unwrap();
+    assert!(primitive.contains(&range(6, "value")));
+    assert!(primitive.contains(&range(7, "value")));
+    assert!(
+        !primitive
+            .iter()
+            .any(|range| matches!(range.start.line, 3 | 4 | 9))
+    );
+    let parameter_type = language.type_definitions(&lib, at(3, "config")).unwrap();
+    assert_eq!(parameter_type, types);
+    let binding = language.definitions(&lib, at(4, "value")).unwrap();
+    assert!(
+        binding
+            .iter()
+            .all(|symbol| symbol.path == lib.canonicalize().unwrap())
+    );
+    drop(language);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "requires rust-analyzer; run cargo test -p refscape-language --test rust_analyzer -- --ignored"]
 fn real_server_follows_cross_file_definitions_references_and_highlights() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

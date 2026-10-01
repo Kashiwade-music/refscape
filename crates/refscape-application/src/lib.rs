@@ -6,12 +6,21 @@ use std::{
 };
 
 use refscape_model::{
-    CODE_CARD_HEADER, CODE_LINE_HEIGHT, CodeCard, Connection, ConnectionKind, MAX_ZOOM, MIN_ZOOM,
-    Point, Position, ProjectCrate, Region, Session, SourceDocument, SourceRange, Symbol, Theme,
-    Viewport,
+    CODE_CARD_HEADER, CODE_LINE_HEIGHT, CODE_REGION_HEADER, CODE_REGION_PADDING, CodeCard,
+    Connection, ConnectionKind, MAX_ZOOM, MIN_ZOOM, Point, Position, ProjectCrate, Region, Session,
+    SourceDocument, SourceRange, Symbol, Theme, Viewport,
 };
 
 pub type Result<T> = std::result::Result<T, String>;
+
+/// Temporary selection, shared by all visible excerpts of the same document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableInspection {
+    pub path: PathBuf,
+    pub position: Position,
+    pub highlights: Vec<SourceRange>,
+    pub description: Option<String>,
+}
 
 /// All structure and relationships come from a language's official backend.
 pub trait LanguageService: Send {
@@ -21,6 +30,18 @@ pub trait LanguageService: Send {
     fn source(&mut self, symbol: &Symbol) -> Result<SourceDocument>;
     fn definitions(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>>;
     fn references(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>>;
+
+    fn type_definitions(&mut self, _path: &Path, _position: Position) -> Result<Vec<Symbol>> {
+        Ok(Vec::new())
+    }
+
+    fn document_highlights(
+        &mut self,
+        _path: &Path,
+        _position: Position,
+    ) -> Result<Vec<SourceRange>> {
+        Ok(Vec::new())
+    }
 
     fn hover(&mut self, _path: &Path, _position: Position) -> Result<Option<String>> {
         Ok(None)
@@ -162,6 +183,53 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
         self.toggle_expansion(card_id, position, ConnectionKind::Definition)
     }
 
+    pub fn inspect_variable(
+        &mut self,
+        card_id: &str,
+        position: Position,
+    ) -> Result<Option<VariableInspection>> {
+        let card = self
+            .session
+            .cards
+            .iter()
+            .find(|card| card.id == card_id)
+            .ok_or_else(|| format!("Unknown card {card_id}"))?;
+        if !card.source.symbol.range.contains(position) {
+            return Err("Requested source position is outside the card".into());
+        }
+        let Some(token) = card.source.variable_token(position) else {
+            return Ok(None);
+        };
+        let position = Position::new(token.line, token.start);
+        let selected = SourceRange {
+            start: position,
+            end: Position::new(token.line, token.start + token.length),
+        };
+        let path = card.source.symbol.path.clone();
+        let mut highlights = self.language.document_highlights(&path, position)?;
+        for range in &highlights {
+            range.validate()?;
+        }
+        if !highlights.contains(&selected) {
+            highlights.push(selected);
+        }
+        let description = self.language.hover(&path, position)?;
+        Ok(Some(VariableInspection {
+            path,
+            position,
+            highlights,
+            description,
+        }))
+    }
+
+    pub fn toggle_type_definition(
+        &mut self,
+        card_id: &str,
+        position: Position,
+    ) -> Result<Option<Vec<String>>> {
+        self.toggle_expansion(card_id, position, ConnectionKind::TypeDefinition)
+    }
+
     pub fn toggle_references(
         &mut self,
         card_id: &str,
@@ -225,6 +293,9 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
             ConnectionKind::Definition => self
                 .language
                 .definitions(&origin.source.symbol.path, position)?,
+            ConnectionKind::TypeDefinition => self
+                .language
+                .type_definitions(&origin.source.symbol.path, position)?,
             ConnectionKind::Reference => self
                 .language
                 .references(&origin.source.symbol.path, position)?,
@@ -529,8 +600,10 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
     }
 }
 
-const CARD_GAP: f32 = 32.0;
+// Include the visible file frame and its title in the space between rows.
+const CARD_GAP: f32 = CODE_REGION_HEADER + CODE_REGION_PADDING + 16.0;
 const CARD_COLUMN_GAP: f32 = 100.0;
+const COLUMN_ALIGNMENT_TOLERANCE: f32 = 32.0;
 
 fn source_anchor_y(card: &CodeCard, position: Position) -> f32 {
     card.position.y
@@ -683,14 +756,14 @@ fn compact_cards(cards: &mut [CodeCard], anchor: Point, connections: &[Connectio
             .then(cards[left].id.cmp(&cards[right].id))
     });
     let mut columns: Vec<Vec<usize>> = vec![];
-    let mut right = f32::NEG_INFINITY;
+    let mut column_left = f32::NEG_INFINITY;
     for index in order {
         let card = &cards[index];
-        if columns.is_empty() || card.position.x >= right + CARD_GAP {
+        // Widths vary within a column. A wide lower card must not merge the
+        // next column into this one just because their horizontal spans overlap.
+        if columns.is_empty() || card.position.x >= column_left + COLUMN_ALIGNMENT_TOLERANCE {
             columns.push(vec![]);
-            right = card.position.x + card.width;
-        } else {
-            right = right.max(card.position.x + card.width);
+            column_left = card.position.x;
         }
         columns
             .last_mut()
@@ -1152,6 +1225,75 @@ mod tests {
     }
 
     #[test]
+    fn stacked_cards_leave_room_for_file_region_headers_and_padding() {
+        let mut explorer = explorer();
+        explorer
+            .add_symbol(symbol("first"), Point::default())
+            .unwrap();
+        explorer
+            .add_symbol(symbol("second"), Point::default())
+            .unwrap();
+        let cards = &explorer.session.cards;
+        // The file frame extends 22 below each card and 36 above the next.
+        assert!(
+            cards[0].position.y + cards[0].display_height() + 22.0 < cards[1].position.y - 36.0
+        );
+        arrange_cards(&mut explorer.session.cards).unwrap();
+        let cards = &explorer.session.cards;
+        assert!(
+            cards[0].position.y + cards[0].display_height() + 22.0 < cards[1].position.y - 36.0
+        );
+    }
+
+    #[test]
+    fn closing_cards_preserves_columns_when_a_lower_card_is_wider() {
+        let mut explorer = explorer();
+        let root = explorer
+            .add_symbol(symbol("root"), Point::default())
+            .unwrap();
+        let child = explorer
+            .expand_definition(&root, Position::new(0, 4))
+            .unwrap()
+            .remove(0);
+        explorer.language.code = "x".repeat(150);
+        let wide = explorer
+            .add_symbol(symbol("wide"), Point::new(0.0, 1000.0))
+            .unwrap();
+        let unrelated = explorer
+            .add_symbol(symbol("unrelated"), Point::new(2000.0, 2000.0))
+            .unwrap();
+        let viewport = explorer.session.viewport;
+        explorer.remove_card(&unrelated).unwrap();
+        let root = explorer
+            .session
+            .cards
+            .iter()
+            .find(|card| card.id == root)
+            .unwrap();
+        let child = explorer
+            .session
+            .cards
+            .iter()
+            .find(|card| card.id == child)
+            .unwrap();
+        let wide = explorer
+            .session
+            .cards
+            .iter()
+            .find(|card| card.id == wide)
+            .unwrap();
+        assert_eq!(root.position.x, wide.position.x);
+        assert!(child.position.x >= wide.position.x + wide.width + CARD_COLUMN_GAP);
+        assert_eq!(child.position.y, source_anchor_y(root, Position::new(0, 4)));
+        assert_eq!(explorer.session.viewport, viewport);
+        for (index, card) in explorer.session.cards.iter().enumerate() {
+            for other in &explorer.session.cards[index + 1..] {
+                assert!(!CardRect::from(card).overlaps(CardRect::from(other)));
+            }
+        }
+    }
+
+    #[test]
     fn hiding_cards_packs_rows_and_columns_without_changing_the_viewport() {
         let mut explorer = explorer();
         explorer.language.code = std::iter::repeat_n("fn source() {}", 20)
@@ -1354,8 +1496,8 @@ mod tests {
         let cards = &restored.session.cards;
         assert_eq!(cards[0].position, Point::default());
         assert_eq!(cards[0].height, 876.0);
-        assert_eq!(cards[1].position.y, 908.0);
-        assert_eq!(cards[2].position.y, 1816.0);
+        assert_eq!(cards[1].position.y, 876.0 + CARD_GAP);
+        assert_eq!(cards[2].position.y, 2.0 * (876.0 + CARD_GAP));
         assert_eq!(cards[3].position, clear);
         let before = cards.clone();
         arrange_cards(&mut restored.session.cards).unwrap();

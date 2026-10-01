@@ -301,6 +301,13 @@ mod tests {
             kind: ConnectionKind::Definition,
             source: Position::new(0, 3),
         });
+        session.connections.push(Connection {
+            id: "main-to-type".into(),
+            from: "main".into(),
+            to: "run".into(),
+            kind: ConnectionKind::TypeDefinition,
+            source: Position::new(0, 3),
+        });
         session.regions.push(Region {
             id: "crate".into(),
             label: "Example crate".into(),

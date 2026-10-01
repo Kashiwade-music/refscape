@@ -3,10 +3,15 @@ use gpui::{Modifiers, TestAppContext, VisualContext};
 use refscape_model::{SourceDocument, SourceRange};
 use std::path::Path;
 
+type Requests = Arc<Mutex<Vec<Position>>>;
+
 struct Language {
     source: SourceDocument,
     requests: Arc<Mutex<Vec<Position>>>,
     targets: Vec<Symbol>,
+    type_targets: Vec<Symbol>,
+    type_requests: Arc<Mutex<Vec<Position>>>,
+    highlights: Vec<SourceRange>,
 }
 impl LanguageService for Language {
     fn open_project(&mut self, _: &Path) -> Result<(), String> {
@@ -31,8 +36,25 @@ impl LanguageService for Language {
         self.requests.lock().unwrap().push(position);
         Ok(self.targets.clone())
     }
+    fn type_definitions(&mut self, _: &Path, position: Position) -> Result<Vec<Symbol>, String> {
+        self.type_requests.lock().unwrap().push(position);
+        Ok(self.type_targets.clone())
+    }
+    fn document_highlights(&mut self, _: &Path, _: Position) -> Result<Vec<SourceRange>, String> {
+        Ok(self.highlights.clone())
+    }
     fn hover(&mut self, _: &Path, position: Position) -> Result<Option<String>, String> {
         self.requests.lock().unwrap().push(position);
+        if self.source.variable_token(position).is_some() {
+            return Ok(Some(format!(
+                "let call: {}",
+                if self.type_targets.is_empty() {
+                    "u32"
+                } else {
+                    "Config"
+                }
+            )));
+        }
         Ok((position == Position::new(12, 9))
             .then(|| "fn call() -> u32\n\nCalls the helper.".into()))
     }
@@ -71,6 +93,9 @@ fn fixture_with_targets(
             source,
             requests: requests.clone(),
             targets,
+            type_targets: vec![],
+            type_requests: Arc::new(Mutex::new(vec![])),
+            highlights: vec![],
         },
         Repository,
     );
@@ -78,6 +103,189 @@ fn fixture_with_targets(
         .add_symbol(symbol, Point::new(100.0, 50.0))
         .unwrap();
     (explorer, requests)
+}
+
+fn variable_fixture(has_type: bool) -> (Explorer<Language, Repository>, Requests, Requests) {
+    let range = SourceRange {
+        start: Position::new(12, 5),
+        end: Position::new(13, 8),
+    };
+    let symbol = Symbol::file("sample.rs".into(), range);
+    let mut definition = symbol.clone();
+    definition.id = "binding".into();
+    definition.name = "binding".into();
+    definition.kind = "location".into();
+    let mut type_symbol = Symbol::file("type.rs".into(), range);
+    type_symbol.name = "Config".into();
+    let source = SourceDocument {
+        symbol: symbol.clone(),
+        code: "日本😀call call\n    call".into(),
+        tokens: [(12, 9), (12, 14), (13, 4)]
+            .into_iter()
+            .map(|(line, start)| refscape_model::SemanticToken {
+                line,
+                start,
+                length: 4,
+                kind: "variable".into(),
+                modifiers: vec![],
+            })
+            .collect(),
+    };
+    let requests = Arc::new(Mutex::new(vec![]));
+    let type_requests = Arc::new(Mutex::new(vec![]));
+    let mut explorer = Explorer::new(
+        Language {
+            source,
+            requests: requests.clone(),
+            targets: vec![definition],
+            type_targets: if has_type { vec![type_symbol] } else { vec![] },
+            type_requests: type_requests.clone(),
+            highlights: vec![
+                SourceRange {
+                    start: Position::new(12, 9),
+                    end: Position::new(12, 13),
+                },
+                SourceRange {
+                    start: Position::new(13, 4),
+                    end: Position::new(13, 8),
+                },
+            ],
+        },
+        Repository,
+    );
+    explorer
+        .add_symbol(symbol, Point::new(100.0, 50.0))
+        .unwrap();
+    (explorer, requests, type_requests)
+}
+
+#[gpui::test]
+fn variable_click_highlights_identity_and_toggles_type_at_any_glyph(cx: &mut TestAppContext) {
+    let (explorer, requests, type_requests) = variable_fixture(true);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        ExplorerView::new(explorer, "session.json".into(), vec![], None, window, cx)
+    });
+    let handle = cx.window_handle();
+    for (glyph, count) in [("日本😀ca", 2), ("日本😀c", 1), ("日本😀", 2)] {
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        let click = view.read_with(cx, |view, _| {
+            let source = &view.painted[0];
+            point(
+                source.origin.x + source.lines[0].x_for_index(glyph.len()) + px(1.0),
+                source.origin.y + px(5.0),
+            )
+        });
+        cx.simulate_mouse_down(click, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(!view.error, "{}", view.status);
+            assert_eq!(view.session.cards.len(), count);
+            let origin = &view.session.cards[0];
+            assert_eq!(
+                variable_highlight_spans(origin, 0, view.inspection.as_ref()),
+                vec!["日本😀".len().."日本😀call".len()]
+            );
+            assert_eq!(
+                variable_highlight_spans(origin, 1, view.inspection.as_ref()),
+                vec![4..8]
+            );
+            if count == 2 {
+                assert_eq!(
+                    view.session.connections[0].kind,
+                    ConnectionKind::TypeDefinition
+                );
+                assert_eq!(view.session.connections[0].source, Position::new(12, 9));
+                assert_eq!(
+                    card_title(&view.session, &view.session.cards[1]),
+                    "call → Config"
+                );
+                assert!(
+                    variable_highlight_spans(&view.session.cards[1], 0, view.inspection.as_ref())
+                        .is_empty()
+                );
+            }
+        });
+    }
+    assert_eq!(
+        *type_requests.lock().unwrap(),
+        vec![Position::new(12, 9); 2]
+    );
+    // Only hover asks the ordinary request recorder; no binding-definition navigation.
+    assert_eq!(*requests.lock().unwrap(), vec![Position::new(12, 9); 3]);
+    cx.simulate_keystrokes("escape");
+    view.read_with(cx, |view, _| assert!(view.inspection.is_none()));
+}
+
+#[gpui::test]
+fn primitive_variable_keeps_highlights_and_alt_click_opens_binding(cx: &mut TestAppContext) {
+    let (explorer, requests, type_requests) = variable_fixture(false);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        ExplorerView::new(explorer, "session.json".into(), vec![], None, window, cx)
+    });
+    let handle = cx.window_handle();
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let click = view.read_with(cx, |view, _| {
+        let source = &view.painted[0];
+        point(
+            source.origin.x + source.lines[0].x_for_index("日本😀".len()) + px(1.0),
+            source.origin.y + px(5.0),
+        )
+    });
+    cx.simulate_mouse_down(click, MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.session.cards.len(), 1);
+        assert!(view.inspection.is_some());
+        assert_eq!(
+            view.inspection.as_ref().unwrap().description.as_deref(),
+            Some("let call: u32")
+        );
+        assert!(!view.error);
+    });
+    assert_eq!(type_requests.lock().unwrap().len(), 1);
+    cx.simulate_mouse_down(
+        click,
+        MouseButton::Left,
+        Modifiers {
+            alt: true,
+            ..Default::default()
+        },
+    );
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert!(view.inspection.is_none());
+        assert_eq!(view.session.cards.len(), 2);
+        assert_eq!(view.session.connections[0].kind, ConnectionKind::Definition);
+    });
+    assert_eq!(*requests.lock().unwrap(), vec![Position::new(12, 9); 2]);
+}
+
+#[gpui::test]
+fn clearing_selection_during_analysis_does_not_restore_stale_highlights(cx: &mut TestAppContext) {
+    let (explorer, _, _) = variable_fixture(false);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        ExplorerView::new(explorer, "session.json".into(), vec![], None, window, cx)
+    });
+    let handle = cx.window_handle();
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let click = view.read_with(cx, |view, _| {
+        let source = &view.painted[0];
+        point(
+            source.origin.x + source.lines[0].x_for_index("日本😀".len()) + px(1.0),
+            source.origin.y + px(5.0),
+        )
+    });
+    cx.simulate_mouse_down(click, MouseButton::Left, Modifiers::default());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert!(!view.busy);
+        assert!(!view.error);
+        assert!(view.inspection.is_none());
+    });
 }
 
 #[gpui::test]
@@ -163,7 +371,21 @@ fn source_hover_is_debounced_and_uses_absolute_utf16_at_each_zoom(cx: &mut TestA
             assert!(panel.bottom() <= view.bounds.bottom());
         });
         let inside_panel = point(panel.left() + px(20.0), panel.top() + px(20.0));
+        let gap = point(word.x, panel.top() - px(3.0));
+        cx.simulate_mouse_move(gap, None, Modifiers::default());
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(
+                view.hover_text.is_some(),
+                "crossing the popup gap keeps it open"
+            );
+        });
         cx.simulate_mouse_move(inside_panel, None, Modifiers::default());
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
         view.read_with(cx, |view, _| {
             assert!(
                 view.hover_text.is_some(),
@@ -177,8 +399,84 @@ fn source_hover_is_debounced_and_uses_absolute_utf16_at_each_zoom(cx: &mut TestA
             "clicks inside the popup must not open definitions"
         );
         cx.simulate_mouse_move(empty, None, Modifiers::default());
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
         view.read_with(cx, |view, _| assert!(view.hover_text.is_none()));
     }
+}
+
+#[gpui::test]
+fn long_hover_documentation_scrolls_without_moving_the_canvas(cx: &mut TestAppContext) {
+    let (explorer, requests) = fixture();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        ExplorerView::new(explorer, "session.json".into(), vec![], None, window, cx)
+    });
+    let handle = cx.window_handle();
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let word = view.read_with(cx, |view, _| {
+        let card = &view.painted[0];
+        point(
+            card.origin.x + card.lines[0].x_for_index("日本😀".len()) + px(1.0),
+            card.origin.y + px(5.0),
+        )
+    });
+    cx.simulate_mouse_move(word, None, Modifiers::default());
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+    view.update(cx, |view, cx| {
+        // A real pointer path can pass over a word on the next source row.
+        view.session.cards[0].source.code.push_str("\n日本😀other");
+        view.session.cards[0].source.symbol.range.end = Position::new(13, 9);
+        view.hover_text = Some(
+            (0..80)
+                .map(|line| format!("Documentation line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        cx.notify();
+    });
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let panel = cx.debug_bounds("code-hover").unwrap();
+    let inside = point(panel.left() + px(20.0), panel.top() + px(20.0));
+    cx.simulate_mouse_move(
+        point(word.x, panel.top() - px(3.0)),
+        None,
+        Modifiers::default(),
+    );
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(100));
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| assert!(view.hover_text.is_some()));
+    cx.simulate_mouse_move(inside, None, Modifiers::default());
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+    let viewport = view.read_with(cx, |view, _| view.session.viewport);
+    cx.simulate_event(ScrollWheelEvent {
+        position: inside,
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
+        ..Default::default()
+    });
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    view.read_with(cx, |view, _| {
+        assert!(view.hover_text.is_some());
+        assert!(
+            view.hover_scroll.offset().y < px(0.0),
+            "documentation actually scrolls"
+        );
+        assert_eq!(view.session.viewport, viewport);
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    });
+    cx.simulate_keystrokes("escape");
+    view.read_with(cx, |view, _| {
+        assert!(view.hover_text.is_none());
+        assert_eq!(view.hover_scroll.offset().y, px(0.0));
+    });
 }
 
 #[gpui::test]

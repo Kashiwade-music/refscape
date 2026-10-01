@@ -11,10 +11,40 @@ pub(super) struct HoverTarget {
 impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<L, R> {
     pub(super) fn clear_hover(&mut self, cx: &mut Context<Self>) {
         self.hover_task = None;
+        self.hover_dismiss_task = None;
+        self.hover_pending_target = None;
         if self.hover_target.take().is_some() || self.hover_text.is_some() {
             self.hover_text = None;
+            self.hover_scroll.set_offset(point(px(0.0), px(0.0)));
             cx.notify();
         }
+    }
+
+    pub(super) fn dismiss_hover(&mut self, cx: &mut Context<Self>) {
+        self.hover_pending_target = None;
+        if self.hover_text.is_none() {
+            self.clear_hover(cx);
+        } else if self.hover_dismiss_task.is_none() {
+            // Let the pointer cross the space between a word and its popup.
+            // Entering either cancels this task, while leaving both closes it.
+            self.hover_dismiss_task = Some(cx.spawn(async move |view, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+                let _ = view.update(cx, |view, cx| {
+                    let next_target = view.hover_pending_target.take();
+                    view.clear_hover(cx);
+                    if let Some(target) = next_target {
+                        view.request_hover(target, cx);
+                    }
+                });
+            }));
+        }
+    }
+
+    fn keep_hover(&mut self) {
+        self.hover_dismiss_task = None;
+        self.hover_pending_target = None;
     }
 
     fn hover_at(&self, mouse: gpui::Point<Pixels>) -> Option<HoverTarget> {
@@ -64,12 +94,24 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         }
         let target = self.hover_at(mouse);
         if target == self.hover_target {
+            self.keep_hover();
+            return;
+        }
+        if self.hover_text.is_some() {
+            // Crossing another code word on the way to the panel should not
+            // replace the explanation before the pointer can reach it.
+            self.dismiss_hover(cx);
+            self.hover_pending_target = target;
             return;
         }
         self.clear_hover(cx);
         let Some(target) = target else {
             return;
         };
+        self.request_hover(target, cx);
+    }
+
+    fn request_hover(&mut self, target: HoverTarget, cx: &mut Context<Self>) {
         self.hover_target = Some(target.clone());
         let explorer = self.explorer.clone();
         self.hover_task = Some(cx.spawn(async move |view, cx| {
@@ -124,6 +166,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                 .w(px(width))
                 .max_h(px(height))
                 .overflow_y_scroll()
+                .track_scroll(&self.hover_scroll)
                 .p_3()
                 .rounded_md()
                 .border_1()
@@ -134,11 +177,24 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                 .font_family("Consolas")
                 .shadow_md()
                 .occlude()
-                .on_mouse_move(|_, _, cx| cx.stop_propagation())
+                .on_mouse_move(cx.listener(|view, _, _, cx| {
+                    view.keep_hover();
+                    cx.stop_propagation();
+                }))
+                .on_hover(cx.listener(|view, hovered, _, cx| {
+                    if *hovered {
+                        view.keep_hover();
+                    } else {
+                        view.dismiss_hover(cx);
+                    }
+                }))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
-                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .on_scroll_wheel(cx.listener(|view, _, _, cx| {
+                    view.keep_hover();
+                    cx.stop_propagation();
+                }))
                 .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
                     if event.keystroke.key == "escape" {
                         view.clear_hover(cx);
