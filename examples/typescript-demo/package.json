@@ -1,0 +1,20 @@
+{
+  "name": "refscape-typescript-demo",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "check": "tsc --noEmit && tsc --noEmit -p mobile"
+  },
+  "dependencies": {
+    "react": "19.3.0",
+    "react-native": "0.87.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "typescript": "5.9.3",
+    "typescript-language-server": "6.0.1"
+  },
+  "engines": {
+    "node": ">=22.22.2"
+  }
+}

@@ -51,6 +51,9 @@ fn settings_roundtrip_and_first_launch_defaults() {
         theme_file: Some(PathBuf::from("themes/custom.json")),
         rust_analyzer_path: Some(PathBuf::from("tools/rust-analyzer")),
         clangd_path: Some(PathBuf::from("tools/clangd")),
+        typescript_language_server_path: Some(PathBuf::from(
+            "tools/typescript-language-server/lib/cli.mjs",
+        )),
         ..Settings::default()
     };
     save_settings(&path, &settings).unwrap();
@@ -117,6 +120,12 @@ fn obsolete_layout_settings_are_ignored_and_removed_when_resaved() {
 
 #[test]
 fn partially_specified_project_options_use_field_defaults() {
+    let options: ProjectOptions = serde_json::from_str(r#"{"language":"typescript"}"#).unwrap();
+    assert_eq!(options.language, ProjectLanguage::TypeScript);
+    assert_eq!(
+        serde_json::to_value(&options).unwrap()["language"],
+        "typescript"
+    );
     let options: ProjectOptions = serde_json::from_str(r#"{"language":"cpp"}"#).unwrap();
     assert_eq!(options.language, ProjectLanguage::Cpp);
     assert_eq!(options.compilation_database, None);

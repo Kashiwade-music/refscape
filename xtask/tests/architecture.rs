@@ -13,6 +13,7 @@ const NAMES: &[&str] = &[
     "refscape-lsp",
     "refscape-language-rust",
     "refscape-language-cpp",
+    "refscape-language-typescript",
     "refscape-language",
     "refscape-storage",
     "refscape-ui",
@@ -35,11 +36,16 @@ const EDGES: &[(&str, &[&str])] = &[
         &["refscape-application", "refscape-lsp", "refscape-model"],
     ),
     (
+        "refscape-language-typescript",
+        &["refscape-application", "refscape-lsp", "refscape-model"],
+    ),
+    (
         "refscape-language",
         &[
             "refscape-application",
             "refscape-language-rust",
             "refscape-language-cpp",
+            "refscape-language-typescript",
             "refscape-model",
         ],
     ),
@@ -139,7 +145,7 @@ impl Drop for Fixture {
 fn valid_workspace_passes_without_fetching_the_reserved_gpui_dependency() {
     let fixture = Fixture::new();
     let report = check_architecture(&fixture.root).unwrap();
-    assert!(report.contains("10 product crates, 24 declared internal dependencies"));
+    assert!(report.contains("11 product crates, 28 declared internal dependencies"));
     assert!(report.contains("xtask isolated"));
     assert!(!fixture.root.join("Cargo.lock").exists());
 }
@@ -161,7 +167,7 @@ fn graph_contains_actual_edges_and_the_isolated_xtask() {
     assert!(graph.contains("refscape_model[\"refscape-model\"]"));
     assert!(graph.contains("refscape_ui -->|\"normal\"| refscape_application"));
     assert!(!graph.contains("refscape_ui -->|\"normal\"| refscape_model"));
-    assert_eq!(graph.matches(" -->|").count(), 23);
+    assert_eq!(graph.matches(" -->|").count(), 27);
     assert!(graph.contains("xtask[\"xtask\"]"));
     assert!(!graph.contains("xtask -->"));
     assert!(!graph.contains("gpui"));
@@ -452,7 +458,11 @@ fn acyclic_but_forbidden_dependency_is_rejected() {
 
 #[test]
 fn adapters_cannot_depend_on_the_selector_even_in_tests() {
-    for adapter in ["refscape-language-rust", "refscape-language-cpp"] {
+    for adapter in [
+        "refscape-language-rust",
+        "refscape-language-cpp",
+        "refscape-language-typescript",
+    ] {
         let fixture = Fixture::new();
         fixture.append(
             &format!("crates/{adapter}/Cargo.toml"),
@@ -474,6 +484,10 @@ fn language_adapters_cannot_depend_on_each_other() {
     for (from, to) in [
         ("refscape-language-rust", "refscape-language-cpp"),
         ("refscape-language-cpp", "refscape-language-rust"),
+        ("refscape-language-typescript", "refscape-language-rust"),
+        ("refscape-language-typescript", "refscape-language-cpp"),
+        ("refscape-language-rust", "refscape-language-typescript"),
+        ("refscape-language-cpp", "refscape-language-typescript"),
     ] {
         let fixture = Fixture::new();
         fixture.append(
@@ -723,6 +737,7 @@ fn language_selector_and_adapters_cannot_import_protocol_types_even_for_tests() 
         "refscape-language",
         "refscape-language-rust",
         "refscape-language-cpp",
+        "refscape-language-typescript",
     ] {
         let fixture = Fixture::new();
         fixture.append(

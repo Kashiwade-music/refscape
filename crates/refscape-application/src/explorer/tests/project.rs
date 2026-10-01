@@ -120,6 +120,49 @@ fn restoring_project_checks_root_and_merges_overrides_before_backend_startup() {
 }
 
 #[test]
+fn typescript_override_clears_saved_cpp_database_before_restoring() {
+    struct Saved(Session);
+    impl SessionRepository for Saved {
+        fn save(&self, _: &Path, _: &Session) -> Result<()> {
+            Ok(())
+        }
+        fn load(&self, _: &Path) -> Result<Session> {
+            Ok(self.0.clone())
+        }
+    }
+    let original = explorer();
+    let root = original.session.project_root.clone();
+    let mut session = original.session;
+    session.project_options = ProjectOptions {
+        language: ProjectLanguage::Cpp,
+        compilation_database: Some(root.join("compile_commands.json")),
+    };
+    let mut restored = Explorer::new(original.language, Saved(session));
+    let typescript = ProjectOptions {
+        language: ProjectLanguage::TypeScript,
+        compilation_database: None,
+    };
+    restored
+        .load_project_session(Path::new("session.json"), &root, &typescript)
+        .unwrap();
+    assert_eq!(restored.language.options, typescript);
+    assert_eq!(restored.session.project_options, typescript);
+    let before = restored.session.clone();
+    let startup_count = restored.language.open_count;
+    let invalid = ProjectOptions {
+        compilation_database: Some(root.join("build")),
+        ..typescript
+    };
+    assert!(
+        restored
+            .load_project_session(Path::new("session.json"), &root, &invalid)
+            .is_err()
+    );
+    assert_eq!(restored.session, before);
+    assert_eq!(restored.language.open_count, startup_count);
+}
+
+#[test]
 fn saved_project_metadata_requires_a_valid_session_and_never_starts_backend() {
     struct Saved(Session);
     impl SessionRepository for Saved {

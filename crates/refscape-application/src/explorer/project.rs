@@ -66,13 +66,22 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
             ));
         }
         session.project_root = saved_root;
-        if overrides.language == ProjectLanguage::Rust && overrides.compilation_database.is_some() {
-            return Err("A compilation database cannot be used with the Rust backend".into());
+        if matches!(
+            overrides.language,
+            ProjectLanguage::Rust | ProjectLanguage::TypeScript
+        ) && overrides.compilation_database.is_some()
+        {
+            return Err(
+                "A compilation database cannot be used with the Rust or TypeScript backend".into(),
+            );
         }
         if overrides.language != ProjectLanguage::Auto {
             session.project_options.language = overrides.language;
         }
-        if overrides.language == ProjectLanguage::Rust {
+        if matches!(
+            overrides.language,
+            ProjectLanguage::Rust | ProjectLanguage::TypeScript
+        ) {
             session.project_options.compilation_database = None;
         } else if let Some(database) = &overrides.compilation_database {
             session.project_options.compilation_database = Some(database.clone());

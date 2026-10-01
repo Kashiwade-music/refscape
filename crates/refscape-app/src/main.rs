@@ -1,4 +1,4 @@
-//! Composition root: native UI, Rust/C/C++ analysis, and versioned JSON storage.
+//! Composition root: native UI, language analysis, and versioned JSON storage.
 
 mod options;
 
@@ -54,7 +54,12 @@ fn run() -> Result<(), String> {
         .or_else(|| env::var_os("REFSCAPE_CLANGD").map(Into::into))
         .unwrap_or_else(|| "clangd".into());
     let mut explorer = Explorer::new(
-        LanguageBackend::new(analyzer, clangd),
+        LanguageBackend::new(analyzer, clangd).with_typescript_server(
+            options
+                .typescript
+                .or_else(|| env::var_os("REFSCAPE_TYPESCRIPT_LANGUAGE_SERVER").map(Into::into))
+                .unwrap_or_else(|| "typescript-language-server".into()),
+        ),
         JsonSessionRepository,
     );
     if options.check {

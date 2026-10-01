@@ -8,6 +8,7 @@ const APPLICATION: &str = "refscape-application";
 const LSP: &str = "refscape-lsp";
 const RUST: &str = "refscape-language-rust";
 const CPP: &str = "refscape-language-cpp";
+const TYPESCRIPT: &str = "refscape-language-typescript";
 const LANGUAGE: &str = "refscape-language";
 const STORAGE: &str = "refscape-storage";
 const UI: &str = "refscape-ui";
@@ -21,7 +22,8 @@ const POLICY: &[(&str, &[&str])] = &[
     (LSP, &[MODEL]),
     (RUST, &[APPLICATION, LSP, MODEL]),
     (CPP, &[APPLICATION, LSP, MODEL]),
-    (LANGUAGE, &[APPLICATION, MODEL, RUST, CPP]),
+    (TYPESCRIPT, &[APPLICATION, LSP, MODEL]),
+    (LANGUAGE, &[APPLICATION, MODEL, RUST, CPP, TYPESCRIPT]),
     (STORAGE, &[APPLICATION, MODEL]),
     (UI, &[APPLICATION, CANVAS, MODEL]),
     (APP, &[APPLICATION, LANGUAGE, MODEL, STORAGE, UI]),

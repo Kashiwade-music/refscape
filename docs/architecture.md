@@ -10,14 +10,15 @@
 | `refscape-lsp` | JSON-RPC通信、文書状態とキャッシュ、共通LSP要求、応答と独自モデルの変換 | `model` |
 | `refscape-language-rust` | Cargoプロジェクト情報、Rustファイル検出、rust-analyzerの起動設定・固有通知、言語サービスの実装 | `application`, `lsp`, `model` |
 | `refscape-language-cpp` | C/C++ファイル検出、compilation database、clangdの起動設定、言語サービスの実装 | `application`, `lsp`, `model` |
-| `refscape-language` | プロジェクトの言語選択、選択した言語サービスへの委譲 | `application`, `language-rust`, `language-cpp`, `model` |
+| `refscape-language-typescript` | TS/JS/TSX/JSXファイル検出、Node/npmサーバー解決、tsserverによる解析のLSP接続 | `application`, `lsp`, `model` |
+| `refscape-language` | プロジェクトの言語選択、選択した言語サービスへの委譲 | `application`, `language-rust`, `language-cpp`, `language-typescript`, `model` |
 | `refscape-storage` | セッション・設定・テーマの保存形式、読み書き、バージョン検査と原子的書き込み | `application`, `model` |
 | `refscape-ui` | GPUIによる描画・入力、背景処理と結果反映、一時的な表示状態、ネイティブウィンドウの起動・終了 | `application`, `canvas`, `model` |
 | `refscape-app` | 実行バイナリ `refscape`、CLIと具体的なアダプターの生成・接続 | `application`, `language`, `model`, `storage`, `ui` |
 | `xtask` | 構造検査、依存グラフの生成、開発用ゲート | 製品への依存なし |
 
 表の依存先は `refscape-` を省略したもの。許可する依存先の上限を示す。
-製品は10 crateでRust/C/C++プロジェクトの解析、Canvas操作、バージョン付き永続化、GPUIの画面を実装する。
+製品は11 crateでRust/C/C++/TypeScript/JavaScriptプロジェクトの解析、Canvas操作、バージョン付き永続化、GPUIの画面を実装する。
 
 `application::ports` が `LanguageService` や `SessionRepository` といったtraitを定義し、
 言語ごとのcrateと `storage` がそれを実装する。`language` は言語選択とサービスへの委譲を行い、
@@ -90,13 +91,13 @@ UIは接続単語のshape結果からworld座標オフセットを取得し、�
 古い配置計画を破棄する。ドラッグプレビューと確定時のロック競合の再試行はUIに置く。
 Arrangeの一回分UndoはID・寸法・位置の世代を照合し、追加・削除・寸法変更・ドラッグで無効化する。
 crate領域にはCargo metadataのworkspaceパッケージと所属ディレクトリを用い、
-ファイル領域と合わせて表示する。workspace外のソースとC/C++のソースはプロジェクト領域にまとめる。
+ファイル領域と合わせて表示する。workspace外のソースとC/C++・TypeScript/JavaScriptのソースはプロジェクト領域にまとめる。
 操作確定・UI反映・保存前にはモデルの不変条件とcanvasの非重複を検証する。
 復元では元から非衝突のカードを固定して必要な重複だけを修復し、regionsを再構築する。
 ソースは保存時点のスナップショットであり、読み込み時に内容を推測で再構築しない。
 
-`LanguageBackend` はプロジェクトの種類と `ProjectOptions` に基づいてRust/C/C++の解析を選ぶ。
-`RustAnalyzer` と `Clangd` はプロジェクトごとにLSPプロセスを起動し、document symbol、workspace symbol、
+`LanguageBackend` はプロジェクトの種類と `ProjectOptions` に基づいてRust/C/C++/TypeScript/JavaScriptの解析を選ぶ。
+`RustAnalyzer`、`Clangd`、`TypeScript` はプロジェクトごとにLSPプロセスを起動し、document symbol、workspace symbol、
 definition、typeDefinition、references、documentHighlight、semantic tokenを独自モデルへ変換する。
 変数・引数・フィールドはsemantic tokenで判別し、クリック時には型定義を展開する。
 documentHighlightで取得した宣言・使用範囲は同じファイルの全カードに表示する。
@@ -115,12 +116,20 @@ JSON-RPCのフレーミング、要求ID、サーバーからの要求、タイ�
 C/C++のファイル一覧はソースツリーのソース・ヘッダーとcompilation databaseのソースを用い、
 コードの構造と関係の解析はclangdに委ねる。Cargoのパッケージ境界を推測で代用しない。
 clangdの索引はバックグラウンドで作成し、Rust専用の解析完了通知は待たない。
+TypeScript/JavaScriptは公式tsserverをtypescript-language-serverでLSPへ接続する。
+TSX/JSXにはReact用language IDを渡し、tsconfig/jsconfigの設定解釈・型・module解決をtsserverに委ねる。
+自動選択はCargo、JS/TS、C/C++の順で、React Nativeのネイティブソースによる誤選択を防ぐ。
+JS/TSアダプターはシンボル検索・参照検索の前に各ソースを開き、別々の設定を持つパッケージも検索対象にする。
+node_modulesや生成ディレクトリはファイル一覧から除き、定義移動先の依存ソースは読み取れる。
+Windowsのnpm shimは既知のCLIパッケージ配置へ解決し、Nodeを直接起動する。
+CLIと環境変数でサーバーを、REFSCAPE_NODEでNodeを選択できる。自動の型パッケージ取得は無効にする。
 保存済みセッションはバックエンド起動前に対象プロジェクトを検証し、保存された解析設定を復元する。
 明示された設定は保存設定より優先し、読み込みに失敗したセッションは自動保存で上書きしない。
 
 永続化はバージョン1のJSON形式で、セッション・テーマ・設定のバージョンを個別に検査する。
 現在のバージョン以外を読み込む移行処理はまだ持たず、未対応バージョンは拒否する。
-セッションの解析設定と設定ファイルのclangd実行パスを保持する。
+セッションの解析設定と設定ファイルのclangd・TypeScriptサーバー実行パスを保持する。
+TypeScriptを明示してセッションを開く場合は、以前のC/C++ compilation databaseを取り除く。
 配置設定はmodelの `LayoutSettings` とし、追加フィールドを `serde(default)` で読み込む。
 バージョン1の既存位置・ID・接続・ソースを維持し、候補・世代・タイマー・Undo履歴は永続化しない。
 書き込みは同じディレクトリの一時ファイルを同期してからrenameし、以前のファイルを先に削除しない。
@@ -267,5 +276,5 @@ cargo fmt --manifest-path xtask/Cargo.toml --all
 xtaskの公開コマンドは `cargo xtask gate` のみとする。
 依存宣言を変更したらゲートを実行し、生成された図を含めて変更を確認する。
 
-通常のゲートは外部のrust-analyzer・clangdが必要なテストをignoreするので、
+通常のゲートは外部のrust-analyzer・clangd・typescript-language-serverが必要なテストをignoreするので、
 ローカルで実行する場合はREADMEの追加テストコマンドを使う。

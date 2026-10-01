@@ -58,7 +58,11 @@ impl RustAnalyzer {
 }
 impl LanguageService for RustAnalyzer {
     fn open_project(&mut self, root: &Path, options: &ProjectOptions) -> Result<(), String> {
-        if options.language == ProjectLanguage::Cpp || options.compilation_database.is_some() {
+        if !matches!(
+            options.language,
+            ProjectLanguage::Auto | ProjectLanguage::Rust
+        ) || options.compilation_database.is_some()
+        {
             return Err("rust-analyzer analyzes Cargo projects and does not accept C/C++ compilation databases".into());
         }
         let root = root

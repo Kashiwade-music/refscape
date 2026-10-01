@@ -111,3 +111,43 @@ fn router_switches_rust_cpp_and_back_and_retains_analysis_after_failed_switch() 
     );
     drop(backend);
 }
+
+#[test]
+#[ignore = "requires rust-analyzer, clangd, Node.js and npm install in examples/typescript-demo"]
+fn router_switches_all_three_languages_and_preserves_typescript_on_failed_switch() {
+    let fixture = Fixture::new();
+    let typescript = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/typescript-demo")
+        .canonicalize()
+        .unwrap();
+    let mut backend = LanguageBackend::default().with_timeout(Duration::from_secs(45));
+    for (root, language) in [
+        (fixture.0.join("rust"), ProjectLanguage::Rust),
+        (fixture.0.join("cpp"), ProjectLanguage::Cpp),
+        (typescript.clone(), ProjectLanguage::TypeScript),
+    ] {
+        backend
+            .open_project(&root, &ProjectOptions::default())
+            .unwrap();
+        assert_eq!(backend.project_options().language, language);
+        assert!(!backend.files().unwrap().is_empty());
+    }
+    let invalid = ProjectOptions {
+        language: ProjectLanguage::Cpp,
+        compilation_database: Some("missing/compile_commands.json".into()),
+    };
+    assert!(
+        backend
+            .open_project(&fixture.0.join("cpp"), &invalid)
+            .is_err()
+    );
+    assert_eq!(
+        backend.project_options().language,
+        ProjectLanguage::TypeScript
+    );
+    assert!(!backend.search("CounterView").unwrap().is_empty());
+    backend
+        .open_project(&fixture.0.join("rust"), &ProjectOptions::default())
+        .unwrap();
+    assert_eq!(backend.project_options().language, ProjectLanguage::Rust);
+}

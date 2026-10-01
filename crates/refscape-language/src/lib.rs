@@ -2,6 +2,7 @@
 use refscape_application::ports::LanguageService;
 use refscape_language_cpp::Clangd;
 use refscape_language_rust::RustAnalyzer;
+use refscape_language_typescript::TypeScript;
 use refscape_model::{
     Position, ProjectCrate, ProjectLanguage, ProjectOptions, SourceDocument, SourceRange, Symbol,
 };
@@ -14,6 +15,7 @@ use std::{
 pub struct LanguageBackend {
     rust_analyzer: PathBuf,
     clangd: PathBuf,
+    typescript: PathBuf,
     timeout: Duration,
     active: Option<Box<dyn LanguageService>>,
 }
@@ -35,12 +37,20 @@ impl LanguageBackend {
         Self {
             rust_analyzer: rust_analyzer.into(),
             clangd: clangd.into(),
+            typescript: executable(
+                "REFSCAPE_TYPESCRIPT_LANGUAGE_SERVER",
+                "typescript-language-server",
+            ),
             timeout: Duration::from_secs(120),
             active: None,
         }
     }
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+    pub fn with_typescript_server(mut self, executable: impl Into<PathBuf>) -> Self {
+        self.typescript = executable.into();
         self
     }
     fn session(&mut self) -> Result<&mut (dyn LanguageService + '_), String> {
@@ -52,17 +62,24 @@ impl LanguageBackend {
 }
 fn select_language(root: &Path, options: &ProjectOptions) -> Result<ProjectLanguage, String> {
     match options.language {
-        ProjectLanguage::Rust if options.compilation_database.is_some() => {
+        ProjectLanguage::Rust | ProjectLanguage::TypeScript
+            if options.compilation_database.is_some() =>
+        {
             Err("A compilation database applies to C/C++; choose the C/C++ language".into())
         }
-        ProjectLanguage::Rust | ProjectLanguage::Cpp => Ok(options.language),
+        ProjectLanguage::Rust | ProjectLanguage::Cpp | ProjectLanguage::TypeScript => {
+            Ok(options.language)
+        }
         ProjectLanguage::Auto if options.compilation_database.is_some() => Ok(ProjectLanguage::Cpp),
         ProjectLanguage::Auto if refscape_language_rust::supports(root) => {
             Ok(ProjectLanguage::Rust)
         }
+        ProjectLanguage::Auto if refscape_language_typescript::supports(root)? => {
+            Ok(ProjectLanguage::TypeScript)
+        }
         ProjectLanguage::Auto if refscape_language_cpp::supports(root)? => Ok(ProjectLanguage::Cpp),
         ProjectLanguage::Auto => Err(format!(
-            "Cannot detect a Rust or C/C++ project in {}. Select a source folder or choose its language explicitly",
+            "Cannot detect a Rust, C/C++, or TypeScript/JavaScript project in {}. Select a source folder or choose its language explicitly",
             root.display()
         )),
     }
@@ -80,6 +97,9 @@ impl LanguageService for LanguageBackend {
                 Box::new(RustAnalyzer::new(&self.rust_analyzer).with_timeout(self.timeout))
             }
             ProjectLanguage::Cpp => Box::new(Clangd::new(&self.clangd).with_timeout(self.timeout)),
+            ProjectLanguage::TypeScript => {
+                Box::new(TypeScript::new(&self.typescript).with_timeout(self.timeout))
+            }
             ProjectLanguage::Auto => unreachable!("selection always resolves automatic detection"),
         };
         next.open_project(&root, options)?;

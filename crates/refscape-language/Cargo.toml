@@ -10,6 +10,7 @@ refscape-application.workspace = true
 refscape-model.workspace = true
 refscape-language-rust.workspace = true
 refscape-language-cpp.workspace = true
+refscape-language-typescript.workspace = true
 
 [lints]
 workspace = true

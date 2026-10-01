@@ -66,7 +66,10 @@ impl LanguageService for Clangd {
                 root.display()
             ));
         }
-        if options.language == ProjectLanguage::Rust {
+        if !matches!(
+            options.language,
+            ProjectLanguage::Auto | ProjectLanguage::Cpp
+        ) {
             return Err("clangd analyzes C/C++ projects; choose the C/C++ language".into());
         }
         let root = root

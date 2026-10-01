@@ -21,6 +21,9 @@ pub struct Settings {
     /// Overrides the clangd executable discovered on PATH.
     #[serde(default)]
     pub clangd_path: Option<PathBuf>,
+    /// Overrides the TypeScript language server executable or Node entry point.
+    #[serde(default)]
+    pub typescript_language_server_path: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -31,6 +34,7 @@ impl Default for Settings {
             theme_file: None,
             rust_analyzer_path: None,
             clangd_path: None,
+            typescript_language_server_path: None,
         }
     }
 }

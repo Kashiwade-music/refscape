@@ -18,6 +18,7 @@ flowchart TD
         refscape_language["refscape-language"]
         refscape_language_cpp["refscape-language-cpp"]
         refscape_language_rust["refscape-language-rust"]
+        refscape_language_typescript["refscape-language-typescript"]
         refscape_lsp["refscape-lsp"]
         refscape_model["refscape-model"]
         refscape_storage["refscape-storage"]
@@ -33,6 +34,7 @@ flowchart TD
         refscape_language -->|"normal"| refscape_application
         refscape_language -->|"normal"| refscape_language_cpp
         refscape_language -->|"normal"| refscape_language_rust
+        refscape_language -->|"normal"| refscape_language_typescript
         refscape_language -->|"normal"| refscape_model
         refscape_language_cpp -->|"normal"| refscape_application
         refscape_language_cpp -->|"normal"| refscape_lsp
@@ -40,6 +42,9 @@ flowchart TD
         refscape_language_rust -->|"normal"| refscape_application
         refscape_language_rust -->|"normal"| refscape_lsp
         refscape_language_rust -->|"normal"| refscape_model
+        refscape_language_typescript -->|"normal"| refscape_application
+        refscape_language_typescript -->|"normal"| refscape_lsp
+        refscape_language_typescript -->|"normal"| refscape_model
         refscape_lsp -->|"normal"| refscape_model
         refscape_storage -->|"normal"| refscape_application
         refscape_storage -->|"normal"| refscape_model
@@ -68,6 +73,7 @@ flowchart LR
         refscape_language["refscape-language"]
         refscape_language_cpp["refscape-language-cpp"]
         refscape_language_rust["refscape-language-rust"]
+        refscape_language_typescript["refscape-language-typescript"]
         refscape_lsp["refscape-lsp"]
         refscape_model["refscape-model"]
         refscape_storage["refscape-storage"]
@@ -87,6 +93,7 @@ flowchart LR
     refscape_language_cpp -->|"normal, workspace"| external_4
     refscape_language_rust -->|"normal, workspace"| external_3
     refscape_language_rust -->|"normal, workspace"| external_4
+    refscape_language_typescript -->|"normal, workspace"| external_4
     refscape_lsp -->|"normal, workspace"| external_3
     refscape_lsp -->|"normal, workspace"| external_4
     refscape_model -->|"normal, workspace"| external_3

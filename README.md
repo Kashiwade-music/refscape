@@ -1,5 +1,5 @@
 # Refscape
-A native spatial code explorer for navigating Rust and C/C++ through references and definitions.
+A native spatial code explorer for navigating Rust, C/C++, and TypeScript/JavaScript (including React and React Native) through references and definitions.
 
 ## 概要
 
@@ -39,7 +39,7 @@ Zoom Levelで表示階層を切り替える。
 
 ## 起動
 
-Windowsを優先したRust/CargoおよびC/C++プロジェクト向けの実装。Refscape自体のビルドにはRustup、MSVC C++ Build Tools、
+Windowsを優先したRust/Cargo、C/C++、TypeScript/JavaScriptプロジェクト向けの実装。Refscape自体のビルドにはRustup、MSVC C++ Build Tools、
 Windows SDKが必要。GPUIのプラットフォーム依存については
 [固定コミットのGPUI README](https://github.com/zed-industries/zed/blob/f8c2cc844057540ca1eac7de4f19f50d7597dead/crates/gpui/README.md)
 を参照。Rustはリポジトリの `rust-toolchain.toml` で `1.98.1` に固定している。
@@ -68,7 +68,8 @@ cargo build --release --locked
 .\target\release\refscape.exe examples/demo
 ```
 
-Rustの解析には `rust-analyzer`、C/C++の解析には `clangd` を使用し、ソースの構造を正規表現などで推測しない。
+Rustの解析には `rust-analyzer`、C/C++の解析には `clangd`、TypeScript/JavaScriptには公式の `tsserver` を使用し、ソースの構造を正規表現などで推測しない。
+`tsserver` とのLSP通信には [typescript-language-server](https://github.com/typescript-language-server/typescript-language-server) を使用する。
 初回解析にはプロジェクトの依存取得・インデックス作成が必要になる。
 プロジェクトが独自のRust toolchainを指定する場合、そのtoolchainにも
 `rust-analyzer` と `rust-src` をインストールする。
@@ -79,7 +80,7 @@ Rustの解析には `rust-analyzer`、C/C++の解析には `clangd` を使用し
 LLVMの `clangd` をインストールし、PATHに追加する。
 実行ファイルは `--clangd PATH` または `REFSCAPE_CLANGD` 環境変数で指定できる。
 Open projectでは、ビルドフォルダではなくソースのルートフォルダを選ぶ。
-CargoプロジェクトはRust、それ以外のC/C++ソースやビルド設定があるプロジェクトはC/C++として開く。
+自動判定はCargo、TypeScript/JavaScript、C/C++の順。React NativeのネイティブC/C++ソースがあってもJS/TSを優先する。
 言語を明示する場合は `--language rust` / `--language c` / `--language cpp` を使用する。
 
 ```powershell
@@ -121,13 +122,55 @@ cargo run --locked -- examples/cpp-demo
 
 Refscapeはビルドを自動実行しない。既存の開発環境が生成したコンパイル設定を利用する。
 
+### TypeScript・React・React Nativeプロジェクトを開く
+
+Node.jsと `typescript` / `typescript-language-server` をインストールする。
+付属デモで使用するtypescript-language-server 6.0.1はNode.js 22.22.2以上が必要。
+既存プロジェクトは通常の開発手順で依存をインストールしてから開く。
+
+```powershell
+# PATH上のNode.jsを使い、解析サーバーを追加
+npm install -g typescript typescript-language-server
+cargo run --locked -- "C:\code\my-react-project"
+
+# 付属のTypeScript / React / React Nativeデモを準備して開く
+npm ci --prefix examples/typescript-demo --ignore-scripts
+npm run check --prefix examples/typescript-demo
+cargo run --locked -- examples/typescript-demo
+
+# 言語やサーバーを明示してウィンドウなしで検証
+cargo run --locked -- --check examples/typescript-demo --language typescript
+cargo run --locked -- "C:\code\my-project" --typescript-language-server "C:\tools\node_modules\typescript-language-server\lib\cli.mjs"
+```
+
+`.ts` / `.tsx` / `.mts` / `.cts`（宣言ファイルを含む）と `.js` / `.jsx` / `.mjs` / `.cjs` を扱う。
+TSXとJSXはそれぞれ `typescriptreact` / `javascriptreact` として解析し、Reactのコンポーネント、Hooks、props、
+React Nativeのコンポーネントにも同じ定義・参照・型・ハイライト・所属宣言の表示を提供する。
+`.native.tsx` / `.ios.tsx` / `.android.tsx` などもファイル一覧に含める。
+`node_modules`、`dist`、`build`、`.next`、`.expo`、`Pods`などの依存・生成ディレクトリは一覧から除外する。
+
+既存の `tsconfig.json` / `jsconfig.json`（extends、paths、project references、JSX設定など）はtsserverが読み込む。
+設定がないフォルダもtsserverのinferred projectとして開く。Refscapeは設定を生成・変更しない。
+React Nativeのプラットフォーム別import解決は、プロジェクトの `moduleSuffixes` 設定に従う。
+デモのmobile設定は `[".native", ""]` を使用し、ios/androidを選ぶ場合も対象のtsconfigで設定する。
+詳細は [TypeScriptのJSX](https://www.typescriptlang.org/docs/handbook/jsx.html) と
+[moduleSuffixes](https://www.typescriptlang.org/tsconfig/#moduleSuffixes) を参照。
+
+既定ではプロジェクトまたは親の `node_modules/typescript-language-server/lib/cli.mjs` を探し、次にPATHを使用する。
+`--typescript-language-server PATH` または `REFSCAPE_TYPESCRIPT_LANGUAGE_SERVER` で実行ファイル・npmのcmd shim・`lib/cli.mjs` を指定できる。
+Windowsのnpm shimは対応するCLIをNode.jsで直接起動する。Node.jsの指定には `REFSCAPE_NODE` を使用する。
+`--language typescript` / `ts` / `javascript` / `js` / `react` / `react-native` は共通のJS/TSバックエンドを選択する。
+言語はセッションに保存され、既存のRust・C/C++セッションも引き続き復元できる。
+別々の設定を持つパッケージも検索できるよう、シンボル検索・参照検索時に各ソースをサーバーで開く。
+解析は開発環境にインストール済みの型定義を利用し、自動の型パッケージ取得は行わない。
+
 ## 操作
 
 左のファイル一覧からファイルカードを開くか、検索欄にシンボル名を入力してEnterで検索し、
 結果をクリックしてカードを配置する。変数・引数・フィールドをクリックすると、同じ値の宣言・使用箇所を
 ハイライトし、その型定義を右側のカードとして展開する。ハイライトは同じファイルを表示する全カードに反映し、
 同名でも別の変数は含めない。型カードのタイトルには `config → Config` のように関係を表示し、
-左側にはrust-analyzerが返す型情報を表示する。プリミティブ型など定義位置がない場合もハイライト・型情報は表示する。
+左側には解析バックエンドが返す型情報を表示する。プリミティブ型など定義位置がない場合もハイライト・型情報は表示する。
 関数・型名などのクリックは定義を展開する。Alt + 左クリックで変数の定義元を明示的に展開できる。
 検索結果のシンボル、またはコード上の同じ単語をもう一度クリックすると、
 対応するカードとその接続線を非表示にする。通常の追加・削除では残ったカードの位置を保つ。
@@ -148,7 +191,7 @@ Refscapeはビルドを自動実行しない。既存の開発環境が生成し
 カードの左上を固定して幅・高さを更新し、新たに衝突するカードだけを元の位置に最も近い空きへ移す。
 衝突していないカードは動かさず、縮小時も空きを詰めない。接続線は新しい表示行に追従する。
 省略区間のソースと展開状態もセッションに保存する。
-この配置規則と所属先の宣言表示は、Rust・C/C++および今後追加するすべての言語に共通の必須仕様とする。
+この配置規則と所属先の宣言表示は、Rust・C/C++・TypeScript/JavaScriptおよび今後追加するすべての言語に共通の必須仕様とする。
 言語ごとのアダプターは公式の解析機能から所属情報を提供し、共通のモデル・配置・描画を利用する。
 コードの単語に約400msホバーすると、解析バックエンドが返す型・シグネチャ・ドキュメントを表示する。
 単語から説明へマウスを移してスクロールでき、単語と説明の両方から離れると少し待って閉じる。Escではすぐに閉じる。
@@ -180,7 +223,7 @@ Refscapeはビルドを自動実行しない。既存の開発環境が生成し
 
 65%以上のズームではソースコード、35～65%ではカードの概要、35%未満では領域を表示する。
 Rustの領域はCargo metadataに基づくworkspaceのcrate（Cargo package単位）と、
-ソースファイルごとにカードを包む。C/C++はプロジェクトとファイルの領域を表示する。
+ソースファイルごとにカードを包む。C/C++とTypeScript/JavaScriptはプロジェクトとファイルの領域を表示する。
 解析中もCanvasを移動でき、解析・保存のエラーは下部のステータス欄に表示する。
 
 Arrangeは根カードの位置を固定し、そこから接続を辿れる子孫だけを配置する。
@@ -228,11 +271,11 @@ cargo run --locked -- "C:\code\my-project" --theme my-theme.json
 
 - マルチプラットフォーム（Windows/Linux/macOS）
   - まずはWindowsから
-- 多言語対応（C++/Python/TypeScript/React）
-  - まずはRustから
+- 多言語対応（Rust/C/C++/TypeScript/JavaScript/React/React Native）
+  - Pythonなどの他言語は今後追加
 
-コード編集機能は持たない。言語解析はRustの `rust-analyzer` とC/C++の `clangd` が対象。
-Windows以外のプラットフォームとPython/TypeScriptなどの他言語は将来の対応範囲。
+コード編集機能は持たない。言語解析はRustの `rust-analyzer`、C/C++の `clangd`、TypeScript/JavaScriptの `tsserver` が対象。
+ReactとReact NativeのTSX/JSXコードも対象。Windows以外のプラットフォームとPythonなどの他言語は将来の対応範囲。
 GPUIが使う描画バックエンドに対応したGPUドライバーが必要。
 マクロ展開の仮想URIなど、実ファイルに対応しないソースへの移動は未対応で、
 解析バックエンドのエラーを画面に表示する。
@@ -243,8 +286,8 @@ GPUIが使う描画バックエンドに対応したGPUドライバーが必要�
 
 ## 開発
 
-製品は10 crateのCargo workspaceで構成し、開発用の `xtask` は独立したworkspaceとする。
-共通LSP処理とCanvas配置を独立させ、RustとC/C++の解析はそれぞれの言語crateが実装する。
+製品は11 crateのCargo workspaceで構成し、開発用の `xtask` は独立したworkspaceとする。
+共通LSP処理とCanvas配置を独立させ、Rust、C/C++、TypeScript/JavaScriptの解析はそれぞれの言語crateが実装する。
 今後の言語も専用crateを追加し、選択層へ登録する。言語crate同士の依存と、全種類の内部依存の循環を禁止する。
 各crateの責務・依存方向・検査ルールは [アーキテクチャ](docs/architecture.md) を参照。
 1ソースファイルは空行・コメント・文字列を除いて `max_file_lines`（1000行）以下とし、子を持つRustモジュールは `<name>.rs` と `<name>/` の組で配置する。`mod.rs` は使わない。
@@ -270,12 +313,20 @@ cargo test -p refscape-app --locked --test workflow -- --ignored
 cargo test -p refscape-language-cpp --locked --test clangd -- --ignored
 cargo test -p refscape-app --locked --test cpp_workflow -- --ignored
 
+# TypeScript / React / React Nativeの実解析・Canvas操作・セッション復元
+# 先に上記の付属デモ依存をインストールする
+cargo test -p refscape-language-typescript --locked --test typescript -- --ignored
+cargo test -p refscape-app --locked --test typescript_workflow -- --ignored
+
+# 全言語間の切り替えと失敗時のプロジェクト保持
+cargo test -p refscape-language --locked --test backends -- --ignored
+
 # ウィンドウを開かず、解析要求・Canvas操作・セッション復元を検証
 cargo run --locked -- --check "C:\code\my-project"
 ```
 
 `cargo xtask gate` が構造検査に成功すると、`docs/dependency-graph.md` を自動生成・更新する。
-実サーバーのテストは外部の `rust-analyzer` / `clangd` が必要なため通常はignoreされる。
+実サーバーのテストは外部の `rust-analyzer` / `clangd` / `typescript-language-server` が必要なため通常はignoreされる。
 
 実GPUによる描画確認用のexampleも用意する。`main` を持つプロジェクトで、
 ライト／ダークのPNGを出力できる。GPUとデスクトップ環境が必要。

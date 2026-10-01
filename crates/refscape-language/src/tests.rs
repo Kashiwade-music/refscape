@@ -80,6 +80,61 @@ fn selection_handles_mixed_roots_explicit_overrides_and_invalid_options() {
     );
 }
 
+#[test]
+fn typescript_precedes_native_cpp_files_and_respects_explicit_language() {
+    let fixture = Fixture::new();
+    fixture.write("native.cpp");
+    fixture.write("App.native.tsx");
+    assert_eq!(
+        select_language(&fixture.0, &ProjectOptions::default()).unwrap(),
+        ProjectLanguage::TypeScript
+    );
+    let explicit = ProjectOptions {
+        language: ProjectLanguage::Cpp,
+        compilation_database: None,
+    };
+    assert_eq!(
+        select_language(&fixture.0, &explicit).unwrap(),
+        ProjectLanguage::Cpp
+    );
+    let database = ProjectOptions {
+        compilation_database: Some("build".into()),
+        ..ProjectOptions::default()
+    };
+    assert_eq!(
+        select_language(&fixture.0, &database).unwrap(),
+        ProjectLanguage::Cpp
+    );
+    let invalid = ProjectOptions {
+        language: ProjectLanguage::TypeScript,
+        ..database
+    };
+    assert!(select_language(&fixture.0, &invalid).is_err());
+    fixture.write("Cargo.toml");
+    assert_eq!(
+        select_language(&fixture.0, &ProjectOptions::default()).unwrap(),
+        ProjectLanguage::Rust
+    );
+}
+
+#[test]
+fn failed_typescript_start_preserves_previous_project() {
+    let fixture = Fixture::new();
+    fixture.write("App.jsx");
+    let mut router =
+        LanguageBackend::default().with_typescript_server(fixture.0.join("no-typescript-server"));
+    router.active = Some(Box::new(ActiveRust));
+    let error = router
+        .open_project(&fixture.0, &ProjectOptions::default())
+        .unwrap_err();
+    assert!(
+        error.contains("REFSCAPE_TYPESCRIPT_LANGUAGE_SERVER"),
+        "{error}"
+    );
+    assert_eq!(router.project_options().language, ProjectLanguage::Rust);
+    assert_eq!(router.files().unwrap(), [PathBuf::from("active.rs")]);
+}
+
 struct ActiveRust;
 impl LanguageService for ActiveRust {
     fn open_project(&mut self, _: &Path, _: &ProjectOptions) -> Result<(), String> {

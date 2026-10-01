@@ -4569,6 +4569,7 @@ dependencies = [
  "refscape-application",
  "refscape-language-cpp",
  "refscape-language-rust",
+ "refscape-language-typescript",
  "refscape-model",
 ]
 
@@ -4590,6 +4591,16 @@ dependencies = [
  "refscape-lsp",
  "refscape-model",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "refscape-language-typescript"
+version = "0.1.0"
+dependencies = [
+ "refscape-application",
+ "refscape-lsp",
+ "refscape-model",
  "serde_json",
 ]
 

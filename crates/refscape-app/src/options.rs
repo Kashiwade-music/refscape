@@ -1,20 +1,22 @@
 use refscape_model::{ProjectLanguage, ProjectOptions};
 use std::{ffi::OsString, path::PathBuf};
 
-pub const HELP: &str = "Refscape — a spatial Rust and C/C++ code explorer\n\n\
+pub const HELP: &str = "Refscape — a spatial Rust, C/C++, and TypeScript/React code explorer\n\n\
 Usage: refscape [PROJECT] [OPTIONS]\n\n\
   --session FILE       Open/save a named session (default: PROJECT/.refscape/session.json)\n\
   --theme FILE         Add a custom JSON theme\n\
   --rust-analyzer EXE  Override the rust-analyzer executable\n\
   --clangd EXE         Override the C/C++ language server executable\n\
-  --language LANGUAGE  Choose auto (default), rust, c, or cpp\n\
+  --typescript-language-server PATH  Override the JS/TS server executable or lib/cli.mjs\n\
+  --language LANGUAGE  Choose auto (default), rust, c, cpp, or typescript (ts)\n\
   --compile-commands PATH  Use compile_commands.json or its containing directory\n\
   --check PROJECT      Verify analysis and session persistence without a window\n\
   --export-theme NAME FILE  Write the light or dark theme as a customizable JSON file\n\
   --help               Show this help\n\n\
 Without PROJECT, choose a source folder using Open project in the window.\n\
 Rust: rustup component add rust-analyzer rust-src\n\
-C/C++: install clangd; build settings are detected or chosen with Build settings.\n";
+C/C++: install clangd; build settings are detected or chosen with Build settings.\n\
+TypeScript/React/React Native: install Node.js and npm install -g typescript typescript-language-server.\n";
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Options {
@@ -23,6 +25,7 @@ pub struct Options {
     pub theme: Option<PathBuf>,
     pub analyzer: Option<PathBuf>,
     pub clangd: Option<PathBuf>,
+    pub typescript: Option<PathBuf>,
     pub project_options: ProjectOptions,
     pub check: bool,
     pub help: bool,
@@ -48,15 +51,27 @@ impl Options {
                 "--language" => {
                     let language = args
                         .next()
-                        .ok_or("--language requires auto, rust, c, or cpp")?;
+                        .ok_or("--language requires auto, rust, c, cpp, or typescript (ts)")?;
                     options.project_options.language = match language.to_str() {
                         Some("auto") => ProjectLanguage::Auto,
                         Some("rust") => ProjectLanguage::Rust,
                         Some("c" | "cpp" | "c++") => ProjectLanguage::Cpp,
-                        _ => return Err("--language requires auto, rust, c, or cpp".into()),
+                        Some(
+                            "typescript" | "ts" | "javascript" | "js" | "react" | "react-native",
+                        ) => ProjectLanguage::TypeScript,
+                        _ => {
+                            return Err(
+                                "--language requires auto, rust, c, cpp, or typescript (ts)".into(),
+                            );
+                        }
                     };
                 }
-                "--session" | "--theme" | "--rust-analyzer" | "--clangd" | "--compile-commands"
+                "--session"
+                | "--theme"
+                | "--rust-analyzer"
+                | "--clangd"
+                | "--compile-commands"
+                | "--typescript-language-server"
                 | "--check" => {
                     let path = args
                         .next()
@@ -69,6 +84,7 @@ impl Options {
                         "--theme" => options.theme = Some(path.into()),
                         "--rust-analyzer" => options.analyzer = Some(path.into()),
                         "--clangd" => options.clangd = Some(path.into()),
+                        "--typescript-language-server" => options.typescript = Some(path.into()),
                         "--compile-commands" => {
                             options.project_options.compilation_database = Some(path.into())
                         }
@@ -107,8 +123,10 @@ impl Options {
         if options.export_theme.is_some() && (options.check || options.project.is_some()) {
             return Err("--export-theme cannot be combined with a project or --check".into());
         }
-        if options.project_options.language == ProjectLanguage::Rust
-            && options.project_options.compilation_database.is_some()
+        if matches!(
+            options.project_options.language,
+            ProjectLanguage::Rust | ProjectLanguage::TypeScript
+        ) && options.project_options.compilation_database.is_some()
         {
             return Err("--compile-commands is only supported for C/C++ projects".into());
         }
@@ -173,5 +191,33 @@ mod tests {
             parse(&[]).unwrap().project_options,
             ProjectOptions::default()
         );
+    }
+
+    #[test]
+    fn accepts_typescript_react_and_javascript_and_rejects_cpp_settings() {
+        for language in [
+            "typescript",
+            "ts",
+            "javascript",
+            "js",
+            "react",
+            "react-native",
+        ] {
+            let options = parse(&[
+                "source folder",
+                "--language",
+                language,
+                "--typescript-language-server",
+                "custom server/lib/cli.mjs",
+            ])
+            .unwrap();
+            assert_eq!(
+                options.project_options.language,
+                ProjectLanguage::TypeScript
+            );
+            assert_eq!(options.typescript, Some("custom server/lib/cli.mjs".into()));
+            assert!(parse(&["--language", language, "--compile-commands", "build"]).is_err());
+        }
+        assert!(parse(&["--typescript-language-server", "--check", "."]).is_err());
     }
 }
