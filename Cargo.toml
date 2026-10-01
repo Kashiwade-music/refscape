@@ -1,0 +1,31 @@
+[workspace]
+members = [
+    "crates/refscape-model",
+    "crates/refscape-application",
+    "crates/refscape-lsp",
+    "crates/refscape-storage",
+    "crates/refscape-ui",
+    "crates/refscape-app",
+]
+default-members = ["crates/refscape-app"]
+exclude = ["xtask"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+refscape-model = { path = "crates/refscape-model" }
+refscape-application = { path = "crates/refscape-application" }
+refscape-lsp = { path = "crates/refscape-lsp" }
+refscape-storage = { path = "crates/refscape-storage" }
+refscape-ui = { path = "crates/refscape-ui" }
+refscape-app = { path = "crates/refscape-app" }
+# Reserved for the UI implementation; empty crates do not activate GPUI yet.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "40180d9c40e2d20eb63d388bff920818f2910b53" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

@@ -51,3 +51,21 @@ UIテーマはライトモードとダークモードを既定で用意してお
 ## 依存ライブラリ
 
 - 描画にはGPUIを使うこと。crates.io 空ではなく、zedのGitHubリポジトリの最新版のコミットから取得すること。
+
+## 開発
+
+製品は6 crateのCargo workspaceで構成し、開発用の `xtask` は独立したworkspaceとする。
+各crateの責務・依存方向・検査ルールは [アーキテクチャ](docs/architecture.md) を参照。
+現在の依存宣言は [依存グラフ](docs/dependency-graph.md) にMermaidで出力する。
+
+Rust toolchainは `rust-toolchain.toml` に固定している。リポジトリのルートで次を実行する。
+
+```sh
+# 構造検査、依存グラフの自動生成・更新、format、clippy、test
+cargo xtask gate
+
+# 空のエントリーポイントを実行（UIは未実装）
+cargo run
+```
+
+`cargo xtask gate` が構造検査に成功すると、`docs/dependency-graph.md` を自動生成・更新する。
