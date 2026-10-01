@@ -1,15 +1,20 @@
+use refscape_model::{ProjectLanguage, ProjectOptions};
 use std::{ffi::OsString, path::PathBuf};
 
-pub const HELP: &str = "Refscape — a spatial Rust code explorer\n\n\
+pub const HELP: &str = "Refscape — a spatial Rust and C/C++ code explorer\n\n\
 Usage: refscape [PROJECT] [OPTIONS]\n\n\
   --session FILE       Open/save a named session (default: PROJECT/.refscape/session.json)\n\
   --theme FILE         Add a custom JSON theme\n\
   --rust-analyzer EXE  Override the rust-analyzer executable\n\
-  --check PROJECT      Verify Rust analysis and session persistence without a window\n\
+  --clangd EXE         Override the C/C++ language server executable\n\
+  --language LANGUAGE  Choose auto (default), rust, c, or cpp\n\
+  --compile-commands PATH  Use compile_commands.json or its containing directory\n\
+  --check PROJECT      Verify analysis and session persistence without a window\n\
   --export-theme NAME FILE  Write the light or dark theme as a customizable JSON file\n\
   --help               Show this help\n\n\
-Without PROJECT, choose a Cargo project using Open project in the window.\n\
-Install the Rust backend with: rustup component add rust-analyzer rust-src\n";
+Without PROJECT, choose a source folder using Open project in the window.\n\
+Rust: rustup component add rust-analyzer rust-src\n\
+C/C++: install clangd; build settings are detected or chosen with Build settings.\n";
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Options {
@@ -17,6 +22,8 @@ pub struct Options {
     pub session: Option<PathBuf>,
     pub theme: Option<PathBuf>,
     pub analyzer: Option<PathBuf>,
+    pub clangd: Option<PathBuf>,
+    pub project_options: ProjectOptions,
     pub check: bool,
     pub help: bool,
     pub export_theme: Option<(String, PathBuf)>,
@@ -38,7 +45,19 @@ impl Options {
             match value {
                 "--" => positional = true,
                 "--help" | "-h" => options.help = true,
-                "--session" | "--theme" | "--rust-analyzer" | "--check" => {
+                "--language" => {
+                    let language = args
+                        .next()
+                        .ok_or("--language requires auto, rust, c, or cpp")?;
+                    options.project_options.language = match language.to_str() {
+                        Some("auto") => ProjectLanguage::Auto,
+                        Some("rust") => ProjectLanguage::Rust,
+                        Some("c" | "cpp" | "c++") => ProjectLanguage::Cpp,
+                        _ => return Err("--language requires auto, rust, c, or cpp".into()),
+                    };
+                }
+                "--session" | "--theme" | "--rust-analyzer" | "--clangd" | "--compile-commands"
+                | "--check" => {
                     let path = args
                         .next()
                         .ok_or_else(|| format!("{value} requires a path"))?;
@@ -49,6 +68,10 @@ impl Options {
                         "--session" => options.session = Some(path.into()),
                         "--theme" => options.theme = Some(path.into()),
                         "--rust-analyzer" => options.analyzer = Some(path.into()),
+                        "--clangd" => options.clangd = Some(path.into()),
+                        "--compile-commands" => {
+                            options.project_options.compilation_database = Some(path.into())
+                        }
                         _ => {
                             options.check = true;
                             if options.project.replace(path.into()).is_some() {
@@ -84,6 +107,11 @@ impl Options {
         if options.export_theme.is_some() && (options.check || options.project.is_some()) {
             return Err("--export-theme cannot be combined with a project or --check".into());
         }
+        if options.project_options.language == ProjectLanguage::Rust
+            && options.project_options.compilation_database.is_some()
+        {
+            return Err("--compile-commands is only supported for C/C++ projects".into());
+        }
         Ok(options)
     }
 }
@@ -110,8 +138,40 @@ mod tests {
             &["--theme", "--check", "."],
             &["a", "b"],
             &["a", "--check", "b"],
+            &["--clangd", "--check", "."],
+            &["--compile-commands"],
+            &["--language"],
+            &["--language", "python"],
+            &["--language", "rust", "--compile-commands", "build"],
         ] {
             assert!(parse(args).is_err());
         }
+    }
+
+    #[test]
+    fn accepts_c_and_cpp_with_separate_build_settings() {
+        for language in ["c", "cpp", "c++"] {
+            let options = parse(&[
+                "source folder",
+                "--language",
+                language,
+                "--compile-commands",
+                "../debug build/compile_commands.json",
+                "--clangd",
+                "custom clangd.exe",
+            ])
+            .unwrap();
+            assert_eq!(options.project, Some("source folder".into()));
+            assert_eq!(options.project_options.language, ProjectLanguage::Cpp);
+            assert_eq!(
+                options.project_options.compilation_database,
+                Some("../debug build/compile_commands.json".into())
+            );
+            assert_eq!(options.clangd, Some("custom clangd.exe".into()));
+        }
+        assert_eq!(
+            parse(&[]).unwrap().project_options,
+            ProjectOptions::default()
+        );
     }
 }

@@ -1,4 +1,4 @@
-//! Composition root: native UI, rust-analyzer, and versioned JSON storage.
+//! Composition root: native UI, Rust/C/C++ analysis, and versioned JSON storage.
 
 mod options;
 
@@ -10,8 +10,8 @@ use std::{
 };
 
 use refscape_application::{Explorer, SessionRepository};
-use refscape_language::RustAnalyzer;
-use refscape_model::{Point, Theme};
+use refscape_language::LanguageBackend;
+use refscape_model::{Point, ProjectOptions, Theme};
 use refscape_storage::{JsonSessionRepository, default_session_path, load_theme, save_theme};
 
 use options::{HELP, Options};
@@ -46,7 +46,14 @@ fn run() -> Result<(), String> {
         .analyzer
         .or_else(|| env::var_os("REFSCAPE_RUST_ANALYZER").map(Into::into))
         .unwrap_or_else(|| "rust-analyzer".into());
-    let mut explorer = Explorer::new(RustAnalyzer::new(analyzer), JsonSessionRepository);
+    let clangd = options
+        .clangd
+        .or_else(|| env::var_os("REFSCAPE_CLANGD").map(Into::into))
+        .unwrap_or_else(|| "clangd".into());
+    let mut explorer = Explorer::new(
+        LanguageBackend::new(analyzer, clangd),
+        JsonSessionRepository,
+    );
     if options.check {
         return check_project(
             &mut explorer,
@@ -54,6 +61,7 @@ fn run() -> Result<(), String> {
                 .project
                 .as_deref()
                 .ok_or("--check requires a project")?,
+            &options.project_options,
         );
     }
     let mut themes = Vec::new();
@@ -86,16 +94,23 @@ fn run() -> Result<(), String> {
             .map(default_session_path)
             .unwrap_or_default()
     });
-    refscape_ui::run(explorer, session_path, themes, project)
+    refscape_ui::run_with_options(
+        explorer,
+        session_path,
+        themes,
+        project,
+        options.project_options,
+    )
 }
 
 /// Real-backend smoke check, with a disposable session that never overwrites user work.
 fn check_project(
-    explorer: &mut Explorer<RustAnalyzer, JsonSessionRepository>,
+    explorer: &mut Explorer<LanguageBackend, JsonSessionRepository>,
     project: &Path,
+    project_options: &ProjectOptions,
 ) -> Result<(), String> {
     let project = std::fs::canonicalize(project).map_err(|e| e.to_string())?;
-    explorer.open_project(&project)?;
+    explorer.open_project_with_options(&project, project_options)?;
     let files = explorer.files()?;
     let mut selected = None;
     for path in &files {
@@ -104,7 +119,7 @@ fn check_project(
             break;
         }
     }
-    let symbol = selected.ok_or("project contains no Rust symbols")?;
+    let symbol = selected.ok_or("project contains no symbols")?;
     let position = symbol.selection_range.start;
     let id = explorer.add_symbol(symbol, Point::new(40.0, 40.0))?;
     let card = explorer
@@ -142,7 +157,7 @@ fn check_project(
     let _ = std::fs::remove_file(path);
     result?;
     println!(
-        "Refscape check passed: {} Rust files, {} cards, {} connections; \
+        "Refscape check passed: {} source files, {} cards, {} connections; \
          {definitions} definition results, {references} reference results, \
          {token_count} semantic tokens; canvas and session roundtrip verified",
         files.len(),

@@ -43,6 +43,9 @@ pub struct Settings {
     pub theme_file: Option<PathBuf>,
     /// Overrides the rust-analyzer executable discovered on PATH.
     pub rust_analyzer_path: Option<PathBuf>,
+    /// Overrides the clangd executable discovered on PATH.
+    #[serde(default)]
+    pub clangd_path: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -52,6 +55,7 @@ impl Default for Settings {
             last_project: None,
             theme_file: None,
             rust_analyzer_path: None,
+            clangd_path: None,
         }
     }
 }
@@ -218,8 +222,8 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use refscape_model::{
-        CodeCard, Connection, ConnectionKind, Point, Position, Region, SourceDocument, SourceRange,
-        Symbol, Viewport,
+        CodeCard, Connection, ConnectionKind, Point, Position, ProjectLanguage, ProjectOptions,
+        Region, SourceDocument, SourceRange, Symbol, Viewport,
     };
 
     struct TestDirectory(PathBuf);
@@ -253,6 +257,7 @@ mod tests {
             last_project: Some(PathBuf::from("workspace/日本語")),
             theme_file: Some(PathBuf::from("themes/custom.json")),
             rust_analyzer_path: Some(PathBuf::from("tools/rust-analyzer")),
+            clangd_path: Some(PathBuf::from("tools/clangd")),
             ..Settings::default()
         };
         save_settings(&path, &settings).unwrap();
@@ -273,10 +278,45 @@ mod tests {
     }
 
     #[test]
+    fn legacy_settings_and_sessions_default_to_automatic_language_detection() {
+        let directory = TestDirectory::new();
+        let settings_path = directory.path("settings.json");
+        fs::write(
+            &settings_path,
+            r#"{"version":1,"last_project":null,"theme_file":null,"rust_analyzer_path":null}"#,
+        )
+        .unwrap();
+        assert_eq!(load_settings(&settings_path).unwrap(), Settings::default());
+
+        let session_path = directory.path("session.json");
+        let session = Session::new(directory.0.clone());
+        let mut legacy = serde_json::to_value(&session).unwrap();
+        legacy.as_object_mut().unwrap().remove("project_options");
+        fs::write(&session_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let restored = JsonSessionRepository.load(&session_path).unwrap();
+        assert_eq!(restored, session);
+        assert_eq!(restored.version, 1);
+        assert_eq!(restored.project_options, ProjectOptions::default());
+    }
+
+    #[test]
+    fn partially_specified_project_options_use_field_defaults() {
+        let options: ProjectOptions = serde_json::from_str(r#"{"language":"cpp"}"#).unwrap();
+        assert_eq!(options.language, ProjectLanguage::Cpp);
+        assert_eq!(options.compilation_database, None);
+        let options: ProjectOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(options, ProjectOptions::default());
+    }
+
+    #[test]
     fn session_roundtrip_preserves_canvas_code_connections_and_theme() {
         let directory = TestDirectory::new();
         let path = directory.path("nested/exploration.json");
         let mut session = Session::new(directory.0.clone());
+        session.project_options = ProjectOptions {
+            language: ProjectLanguage::Cpp,
+            compilation_database: Some(directory.path("out/debug/compile_commands.json")),
+        };
         let range = SourceRange {
             start: Position::new(0, 0),
             end: Position::new(1, 0),

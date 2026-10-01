@@ -13,7 +13,7 @@
 | `xtask` | 構造検査、依存グラフの生成、開発用ゲート | 製品への依存なし |
 
 表の依存先は `refscape-` を省略したもの。許可する依存先の上限を示す。
-製品crateはRustプロジェクトの解析、Canvas操作、バージョン付き永続化、GPUIの画面を実装する。
+製品crateはRust/C/C++プロジェクトの解析、Canvas操作、バージョン付き永続化、GPUIの画面を実装する。
 
 `application` が `LanguageService` や `SessionRepository` といったtraitを定義し、
 `language` と `storage` がそれを実装する。`app` が具体的な実装を生成して渡す。
@@ -44,11 +44,12 @@ Canvasの状態や配置規則はUI非依存とし、ファイルの保存形式
 閉じたカードから辿れる子孫も削除するが、他の枝から繋がる子孫は保持する。循環は訪問済み集合で処理する。
 展開・再配置では接続元の絶対行からカード内のコード行の高さを求め、子カードの配置基準にする。
 crate領域にはCargo metadataのworkspaceパッケージと所属ディレクトリを用い、
-ファイル領域と合わせて表示する。workspace外のソースはプロジェクト領域にまとめる。
+ファイル領域と合わせて表示する。workspace外のソースとC/C++のソースはプロジェクト領域にまとめる。
 セッション保存前にはモデルの不変条件を検証する。
 ソースは保存時点のスナップショットであり、読み込み時に内容を推測で再構築しない。
 
-`RustAnalyzer` はプロジェクトごとにLSPプロセスを起動し、document symbol、workspace symbol、
+`LanguageBackend` はプロジェクトの種類と `ProjectOptions` に基づいてRust/C/C++の解析を選ぶ。
+`RustAnalyzer` と `Clangd` はプロジェクトごとにLSPプロセスを起動し、document symbol、workspace symbol、
 definition、typeDefinition、references、documentHighlight、semantic tokenを独自モデルへ変換する。
 変数・引数・フィールドはsemantic tokenで判別し、クリック時には型定義を展開する。
 documentHighlightで取得した宣言・使用範囲は同じファイルの全カードに表示する。
@@ -60,8 +61,18 @@ JSON-RPCのフレーミング、要求ID、サーバーからの要求、タイ�
 `language/src/transport.rs` にまとめる。外部ファイルの更新時には解析キャッシュを無効にする。
 仮想URIのマクロ展開など、ファイル上のソースに変換できない応答は明示的なエラーにする。
 
+ソースルートとコンパイル設定の場所は独立して保持する。
+`ProjectOptions` は言語と任意のcompilation databaseのパスを持つUI非依存モデルであり、
+検出・形式の検証・clangdの起動引数への変換は `language` が担う。
+C/C++のファイル一覧はソースツリーのソース・ヘッダーとcompilation databaseのソースを用い、
+コードの構造と関係の解析はclangdに委ねる。Cargoのパッケージ境界を推測で代用しない。
+clangdの索引はバックグラウンドで作成し、Rust専用の解析完了通知は待たない。
+保存済みセッションはバックエンド起動前に対象プロジェクトを検証し、保存された解析設定を復元する。
+明示された設定は保存設定より優先し、読み込みに失敗したセッションは自動保存で上書きしない。
+
 永続化はバージョン1のJSON形式で、セッション・テーマ・設定のバージョンを個別に検査する。
 現在のバージョン以外を読み込む移行処理はまだ持たず、未対応バージョンは拒否する。
+セッションの解析設定と設定ファイルのclangd実行パスは省略可能な追加フィールドとし、旧バージョン1の文書も読み込める。
 書き込みは同じディレクトリの一時ファイルを同期してからrenameし、以前のファイルを先に削除しない。
 
 ## WorkspaceとGPUI

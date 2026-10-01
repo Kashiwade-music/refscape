@@ -7,8 +7,8 @@ use std::{
 
 use refscape_model::{
     CODE_CARD_HEADER, CODE_LINE_HEIGHT, CODE_REGION_HEADER, CODE_REGION_PADDING, CodeCard,
-    Connection, ConnectionKind, MAX_ZOOM, MIN_ZOOM, Point, Position, ProjectCrate, Region, Session,
-    SourceDocument, SourceRange, Symbol, Theme, Viewport,
+    Connection, ConnectionKind, MAX_ZOOM, MIN_ZOOM, Point, Position, ProjectCrate, ProjectLanguage,
+    ProjectOptions, Region, Session, SourceDocument, SourceRange, Symbol, Theme, Viewport,
 };
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -25,6 +25,16 @@ pub struct VariableInspection {
 /// All structure and relationships come from a language's official backend.
 pub trait LanguageService: Send {
     fn open_project(&mut self, root: &Path) -> Result<()>;
+
+    fn open_project_with_options(&mut self, root: &Path, _options: &ProjectOptions) -> Result<()> {
+        self.open_project(root)
+    }
+
+    /// Effective options after opening, including any automatically selected settings.
+    fn project_options(&self) -> ProjectOptions {
+        ProjectOptions::default()
+    }
+
     fn files(&mut self) -> Result<Vec<PathBuf>>;
     fn symbols(&mut self, path: &Path) -> Result<Vec<Symbol>>;
     fn source(&mut self, symbol: &Symbol) -> Result<SourceDocument>;
@@ -88,6 +98,14 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
     }
 
     pub fn open_project(&mut self, root: &Path) -> Result<()> {
+        self.open_project_with_options(root, &ProjectOptions::default())
+    }
+
+    pub fn open_project_with_options(
+        &mut self,
+        root: &Path,
+        options: &ProjectOptions,
+    ) -> Result<()> {
         let root = root
             .canonicalize()
             .map_err(|error| format!("Cannot open project {}: {error}", root.display()))?;
@@ -97,10 +115,11 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
                 root.display()
             ));
         }
-        self.language.open_project(&root)?;
+        self.language.open_project_with_options(&root, options)?;
         let project_crates = self.language.project_crates()?;
         let theme = self.session.theme.clone();
         self.session = Session::new(root);
+        self.session.project_options = self.language.project_options();
         self.session.theme = theme;
         self.project_crates = project_crates;
         Ok(())
@@ -495,10 +514,70 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
     }
 
     pub fn load_session(&mut self, path: &Path) -> Result<()> {
+        let session = self.repository.load(path)?;
+        self.restore_session(session)
+    }
+
+    /// Inspect the saved project without starting or changing the language backend.
+    pub fn session_project_root(&self, path: &Path) -> Result<PathBuf> {
+        let session = self.repository.load(path)?;
+        session.validate()?;
+        Ok(session.project_root)
+    }
+
+    /// Restore a project's canvas with explicitly selected analysis settings.
+    /// Root mismatches are rejected before any language server is started.
+    pub fn load_project_session(
+        &mut self,
+        path: &Path,
+        expected_root: &Path,
+        overrides: &ProjectOptions,
+    ) -> Result<()> {
         let mut session = self.repository.load(path)?;
         session.validate()?;
+        let expected_root = expected_root
+            .canonicalize()
+            .map_err(|error| format!("Cannot open project {}: {error}", expected_root.display()))?;
+        let saved_root = session.project_root.canonicalize().map_err(|error| {
+            format!(
+                "Cannot open session project {}: {error}",
+                session.project_root.display()
+            )
+        })?;
+        if saved_root != expected_root {
+            return Err(format!(
+                "Session project {} does not match selected project {}",
+                saved_root.display(),
+                expected_root.display()
+            ));
+        }
+        session.project_root = saved_root;
+        if overrides.language == ProjectLanguage::Rust && overrides.compilation_database.is_some() {
+            return Err("A compilation database cannot be used with the Rust backend".into());
+        }
+        if overrides.language != ProjectLanguage::Auto {
+            session.project_options.language = overrides.language;
+        }
+        if overrides.language == ProjectLanguage::Rust {
+            session.project_options.compilation_database = None;
+        } else if let Some(database) = &overrides.compilation_database {
+            session.project_options.compilation_database = Some(database.clone());
+            if overrides.language == ProjectLanguage::Auto {
+                session.project_options.language = ProjectLanguage::Cpp;
+            }
+        }
+        self.restore_session(session)
+    }
+
+    fn restore_session(&mut self, mut session: Session) -> Result<()> {
+        session.validate()?;
         arrange_cards(&mut session.cards)?;
-        self.language.open_project(&session.project_root)?;
+        self.language
+            .open_project_with_options(&session.project_root, &session.project_options)?;
+        let effective_options = self.language.project_options();
+        if effective_options != ProjectOptions::default() {
+            session.project_options = effective_options;
+        }
         let project_crates = self.language.project_crates()?;
         self.session = session;
         self.project_crates = project_crates;
@@ -873,10 +952,20 @@ mod tests {
         code: String,
         additional: Vec<Symbol>,
         crates: Vec<ProjectCrate>,
+        options: ProjectOptions,
+        open_count: usize,
     }
     impl LanguageService for Language {
         fn open_project(&mut self, _: &Path) -> Result<()> {
             Ok(())
+        }
+        fn open_project_with_options(&mut self, _: &Path, options: &ProjectOptions) -> Result<()> {
+            self.options = options.clone();
+            self.open_count += 1;
+            Ok(())
+        }
+        fn project_options(&self) -> ProjectOptions {
+            self.options.clone()
         }
         fn files(&mut self) -> Result<Vec<PathBuf>> {
             Ok(vec![self.target.path.clone()])
@@ -940,6 +1029,8 @@ mod tests {
                 code: "fn target() {}".into(),
                 additional: Vec::new(),
                 crates: Vec::new(),
+                options: ProjectOptions::default(),
+                open_count: 0,
             },
             Repository,
         );
@@ -947,6 +1038,156 @@ mod tests {
             .open_project(&std::env::current_dir().unwrap())
             .unwrap();
         explorer
+    }
+
+    #[test]
+    fn opening_and_restoring_preserve_source_root_and_analysis_options() {
+        let root = std::env::current_dir().unwrap();
+        let options = ProjectOptions {
+            language: ProjectLanguage::Cpp,
+            compilation_database: Some(root.join("out/debug/compile_commands.json")),
+        };
+        let mut original = explorer();
+        original.open_project_with_options(&root, &options).unwrap();
+        assert_eq!(original.session.project_root, root.canonicalize().unwrap());
+        assert_eq!(original.language.options, options);
+        assert_eq!(original.session.project_options, options);
+
+        struct Saved(Session);
+        impl SessionRepository for Saved {
+            fn save(&self, _: &Path, _: &Session) -> Result<()> {
+                Ok(())
+            }
+            fn load(&self, _: &Path) -> Result<Session> {
+                Ok(self.0.clone())
+            }
+        }
+        let saved = original.session.clone();
+        original.language.options = ProjectOptions::default();
+        let mut restored = Explorer::new(original.language, Saved(saved.clone()));
+        restored.load_session(Path::new("session.json")).unwrap();
+        assert_eq!(restored.language.options, options);
+        assert_eq!(restored.session, saved);
+
+        restored.open_project(&root).unwrap();
+        assert_eq!(restored.session.project_options, ProjectOptions::default());
+    }
+
+    #[test]
+    fn restoring_project_checks_root_and_merges_overrides_before_backend_startup() {
+        struct Saved(Session);
+        impl SessionRepository for Saved {
+            fn save(&self, _: &Path, _: &Session) -> Result<()> {
+                Ok(())
+            }
+            fn load(&self, _: &Path) -> Result<Session> {
+                Ok(self.0.clone())
+            }
+        }
+        let original = explorer();
+        let root = original.session.project_root.clone();
+        let mut saved = original.session;
+        saved.project_options = ProjectOptions {
+            language: ProjectLanguage::Cpp,
+            compilation_database: Some(root.join("saved/compile_commands.json")),
+        };
+        let mut restored = Explorer::new(original.language, Saved(saved));
+        let startup_count = restored.language.open_count;
+        let before = restored.session.clone();
+        let session_path = Path::new("session.json");
+        let error = restored
+            .load_project_session(
+                session_path,
+                &std::env::temp_dir(),
+                &ProjectOptions::default(),
+            )
+            .unwrap_err();
+        assert!(error.contains("does not match selected project"));
+        assert_eq!(restored.language.open_count, startup_count);
+        assert_eq!(restored.session, before);
+
+        let selected_database = root.join("selected/compile_commands.json");
+        let overrides = ProjectOptions {
+            language: ProjectLanguage::Auto,
+            compilation_database: Some(selected_database.clone()),
+        };
+        restored
+            .load_project_session(session_path, &root, &overrides)
+            .unwrap();
+        assert_eq!(restored.language.open_count, startup_count + 1);
+        assert_eq!(restored.language.options.language, ProjectLanguage::Cpp);
+        assert_eq!(
+            restored.session.project_options.compilation_database,
+            Some(selected_database)
+        );
+
+        let rust = ProjectOptions {
+            language: ProjectLanguage::Rust,
+            compilation_database: None,
+        };
+        restored
+            .load_project_session(session_path, &root, &rust)
+            .unwrap();
+        assert_eq!(restored.language.options, rust);
+        assert_eq!(restored.session.project_options, rust);
+
+        restored.repository.0.project_options = rust;
+        restored
+            .load_project_session(session_path, &root, &overrides)
+            .unwrap();
+        assert_eq!(restored.language.options.language, ProjectLanguage::Cpp);
+        assert_eq!(restored.session.project_options, restored.language.options);
+        assert_eq!(
+            restored.session.project_options.compilation_database,
+            overrides.compilation_database
+        );
+
+        let incompatible = ProjectOptions {
+            language: ProjectLanguage::Rust,
+            compilation_database: Some(root.join("compile_commands.json")),
+        };
+        let startup_count = restored.language.open_count;
+        let before = restored.session.clone();
+        assert!(
+            restored
+                .load_project_session(session_path, &root, &incompatible)
+                .is_err()
+        );
+        assert_eq!(restored.language.open_count, startup_count);
+        assert_eq!(restored.session, before);
+    }
+
+    #[test]
+    fn saved_project_metadata_requires_a_valid_session_and_never_starts_backend() {
+        struct Saved(Session);
+        impl SessionRepository for Saved {
+            fn save(&self, _: &Path, _: &Session) -> Result<()> {
+                Ok(())
+            }
+            fn load(&self, _: &Path) -> Result<Session> {
+                Ok(self.0.clone())
+            }
+        }
+        let original = explorer();
+        let mut saved = original.session.clone();
+        saved.project_root = PathBuf::from("missing/source/folder");
+        let mut inspected = Explorer::new(original.language, Saved(saved));
+        let startup_count = inspected.language.open_count;
+        let before = inspected.session.clone();
+        assert_eq!(
+            inspected
+                .session_project_root(Path::new("session.json"))
+                .unwrap(),
+            PathBuf::from("missing/source/folder")
+        );
+        inspected.repository.0.version += 1;
+        assert!(
+            inspected
+                .session_project_root(Path::new("session.json"))
+                .is_err()
+        );
+        assert_eq!(inspected.language.open_count, startup_count);
+        assert_eq!(inspected.session, before);
     }
 
     #[test]

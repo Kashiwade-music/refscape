@@ -1,10 +1,17 @@
-//! Read-only Rust analysis through rust-analyzer's official Language Server Protocol.
+//! Read-only Rust and C/C++ analysis through rust-analyzer and clangd over LSP.
 //! Source structure is always supplied by the language server, never inferred from text.
+mod backend;
+mod cpp;
 mod project;
+
+pub use backend::{Clangd, LanguageBackend};
 mod transport;
 
 use refscape_application::LanguageService;
-use refscape_model::{Position, ProjectCrate, SemanticToken, SourceDocument, SourceRange, Symbol};
+use refscape_model::{
+    Position, ProjectCrate, ProjectLanguage, ProjectOptions, SemanticToken, SourceDocument,
+    SourceRange, Symbol,
+};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -28,6 +35,7 @@ pub struct RustAnalyzer {
     token_modifiers: Vec<String>,
     semantic_tokens: bool,
     project: Option<project::Project>,
+    cpp_project: Option<cpp::CppProject>,
 }
 
 impl Default for RustAnalyzer {
@@ -54,6 +62,7 @@ impl RustAnalyzer {
             token_modifiers: vec![],
             semantic_tokens: false,
             project: None,
+            cpp_project: None,
         }
     }
 
@@ -62,10 +71,110 @@ impl RustAnalyzer {
         self
     }
 
+    fn start_session(
+        &mut self,
+        root: PathBuf,
+        rust_project: Option<project::Project>,
+        cpp_project: Option<cpp::CppProject>,
+    ) -> Result<(), String> {
+        // Prepare the replacement independently so failed opens preserve the active project.
+        let cpp = cpp_project.is_some();
+        let server = if cpp { "clangd" } else { "rust-analyzer" };
+        let mut command = Command::new(&self.executable);
+        command.current_dir(&root);
+        if let Some(project) = &cpp_project {
+            command.args(["--background-index", "--enable-config"]);
+            if let Some(database) = &project.database {
+                let mut flag = std::ffi::OsString::from("--compile-commands-dir=");
+                flag.push(
+                    database
+                        .parent()
+                        .ok_or("compilation database has no directory")?,
+                );
+                command.arg(flag);
+            }
+        }
+        let mut client = Transport::spawn(&mut command, self.timeout, server)?;
+        let uri = path_uri(&root)?;
+        let capabilities = client.request("initialize", json!({
+            "processId":std::process::id(),"rootUri":uri,
+            "clientInfo":{"name":"Refscape","version":env!("CARGO_PKG_VERSION")},
+            "workspaceFolders":[{"uri":uri,"name":root.file_name().unwrap_or_default().to_string_lossy()}],
+            "capabilities":{
+                "general":{"positionEncodings":["utf-16"]},
+                "offsetEncoding":["utf-16"],
+                "window":{"workDoneProgress":true},
+                "workspace":{"configuration":true,"workspaceFolders":true,"symbol":{"symbolKind":{"valueSet":(1..=26).collect::<Vec<_>>()}}},
+                "textDocument":{
+                    "documentSymbol":{"hierarchicalDocumentSymbolSupport":true},
+                    "definition":{"linkSupport":true},
+                    "typeDefinition":{"linkSupport":true},
+                    "documentHighlight":{},
+                    "hover":{"contentFormat":["plaintext"]},
+                    "semanticTokens":{"requests":{"full":true},"tokenTypes":["namespace","type","class","enum","interface","struct","typeParameter","parameter","variable","property","enumMember","event","function","method","macro","keyword","modifier","comment","string","number","regexp","operator","decorator"],"tokenModifiers":["declaration","definition","readonly","static","deprecated","abstract","async","modification","documentation","defaultLibrary"],"formats":["relative"],"overlappingTokenSupport":false,"multilineTokenSupport":false}
+                },
+                "experimental":{"serverStatusNotification":!cpp}
+            },
+            "initializationOptions":if cpp { json!({}) } else { json!({"checkOnSave":false}) }
+        }))?;
+        let encoding = capabilities["capabilities"]["positionEncoding"]
+            .as_str()
+            .or_else(|| capabilities["offsetEncoding"].as_str())
+            .unwrap_or("utf-16");
+        if encoding != "utf-16" {
+            return Err(format!(
+                "unsupported {server} position encoding: {encoding}"
+            ));
+        }
+        let provider = &capabilities["capabilities"]["semanticTokensProvider"];
+        let semantic_tokens = !provider.is_null();
+        let token_types = strings(&provider["legend"]["tokenTypes"]);
+        let token_modifiers = strings(&provider["legend"]["tokenModifiers"]);
+        client.notify("initialized", json!({}))?;
+        if !cpp {
+            client.wait_for_index()?;
+        }
+        // clangd loads the compilation database lazily on the first didOpen. Prime
+        // one TU so workspace search works even before the user opens a source card.
+        // Await that file's AST, not rust-analyzer's server-status notification or
+        // completion of the background index, which clangd does not promise here.
+        let seed = cpp_project
+            .as_ref()
+            .map(|project| project.index_seed(&root))
+            .transpose()?
+            .flatten();
+        let mut primed = None;
+        if let Some(path) = seed {
+            let text = fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let uri = path_uri(&path)?;
+            client.notify("textDocument/didOpen", json!({"textDocument":{"uri":uri,"languageId":cpp::language_id(&path),"version":1,"text":text}}))?;
+            client.request(
+                "textDocument/documentSymbol",
+                json!({"textDocument":{"uri":uri}}),
+            )?;
+            primed = Some((path, text));
+        }
+        self.root = Some(root);
+        self.project = rust_project;
+        self.cpp_project = cpp_project;
+        self.transport = Some(client);
+        self.semantic_tokens = semantic_tokens;
+        self.token_types = token_types;
+        self.token_modifiers = token_modifiers;
+        self.opened.clear();
+        if let Some((path, text)) = primed {
+            self.opened.insert(path, text);
+        }
+        self.symbol_cache.clear();
+        self.token_cache.clear();
+        Ok(())
+    }
+
     fn client(&mut self) -> Result<&mut Transport, String> {
         self.transport
             .as_mut()
-            .ok_or_else(|| "open a Rust project before requesting analysis".into())
+            .ok_or_else(|| "open a project before requesting analysis".into())
     }
 
     fn resolve(&self, path: &Path) -> Result<PathBuf, String> {
@@ -94,16 +203,21 @@ impl RustAnalyzer {
             self.token_cache.remove(&path);
         }
         if !self.opened.contains_key(&path) {
+            let language_id = if self.cpp_project.is_some() {
+                cpp::language_id(&path)
+            } else {
+                "rust"
+            };
             self.client()?.notify(
                 "textDocument/didOpen",
-                json!({"textDocument":{"uri":uri,"languageId":"rust","version":1,"text":text}}),
+                json!({"textDocument":{"uri":uri,"languageId":language_id,"version":1,"text":text}}),
             )?;
             self.opened.insert(path.clone(), text.clone());
         }
         Ok((path, uri, text))
     }
 
-    /// Search the server's Rust symbol index, then resolve results to complete source ranges.
+    /// Search the server's symbol index, then resolve results to complete source ranges.
     pub fn search(&mut self, query: &str) -> Result<Vec<Symbol>, String> {
         let values = self
             .client()?
@@ -117,6 +231,35 @@ impl RustAnalyzer {
             let path = uri_path(string(location, "uri")?)?;
             let range: SourceRange = decode(&location["range"])?;
             symbols.push(self.symbol_at(&path, range, Some(string(value, "name")?.into()))?);
+        }
+        if self
+            .cpp_project
+            .as_ref()
+            .is_some_and(|project| project.database.is_none())
+        {
+            // Fallback commands cannot background-index a project. Supplement the
+            // workspace results with LSP document symbols, while retaining indexed
+            // external symbols from any database configured by .clangd itself.
+            fn matches(symbols: &[Symbol], query: &str, output: &mut Vec<Symbol>) {
+                for symbol in symbols {
+                    if symbol.name.to_lowercase().contains(query) {
+                        output.push(symbol.clone());
+                    }
+                    matches(&symbol.children, query, output);
+                }
+            }
+            let query = query.to_lowercase();
+            for file in self.files()? {
+                matches(&self.symbols(&file)?, &query, &mut symbols);
+            }
+            symbols.sort_by(|left, right| {
+                (&left.path, left.range.start, left.range.end, &left.name).cmp(&(
+                    &right.path,
+                    right.range.start,
+                    right.range.end,
+                    &right.name,
+                ))
+            });
         }
         deduplicate(&mut symbols);
         Ok(symbols)
@@ -188,6 +331,16 @@ impl RustAnalyzer {
 }
 
 impl LanguageService for RustAnalyzer {
+    fn project_options(&self) -> ProjectOptions {
+        self.cpp_project
+            .as_ref()
+            .map(cpp::CppProject::options)
+            .unwrap_or(ProjectOptions {
+                language: ProjectLanguage::Rust,
+                compilation_database: None,
+            })
+    }
+
     fn hover(&mut self, path: &Path, position: Position) -> Result<Option<String>, String> {
         let (_, uri, text) = self.open_document(path)?;
         byte_offset(&text, position)?;
@@ -198,6 +351,9 @@ impl LanguageService for RustAnalyzer {
         hover_contents(&value)
     }
     fn project_crates(&mut self) -> Result<Vec<ProjectCrate>, String> {
+        if self.cpp_project.is_some() {
+            return Ok(Vec::new());
+        }
         Ok(self
             .project
             .as_ref()
@@ -219,59 +375,14 @@ impl LanguageService for RustAnalyzer {
                 root.display()
             ));
         }
-        // Prepare the replacement independently so failed opens preserve the active project.
-        let mut command = Command::new(&self.executable);
-        command.current_dir(&root);
-        let mut client = Transport::spawn(&mut command, self.timeout)?;
-        let uri = path_uri(&root)?;
-        let capabilities = client.request("initialize", json!({
-            "processId":std::process::id(),"rootUri":uri,
-            "clientInfo":{"name":"Refscape","version":env!("CARGO_PKG_VERSION")},
-            "workspaceFolders":[{"uri":uri,"name":root.file_name().unwrap_or_default().to_string_lossy()}],
-            "capabilities":{
-                "general":{"positionEncodings":["utf-16"]},
-                "window":{"workDoneProgress":true},
-                "workspace":{"configuration":true,"workspaceFolders":true,"symbol":{"symbolKind":{"valueSet":(1..=26).collect::<Vec<_>>()}}},
-                "textDocument":{
-                    "documentSymbol":{"hierarchicalDocumentSymbolSupport":true},
-                    "definition":{"linkSupport":true},
-                    "typeDefinition":{"linkSupport":true},
-                    "documentHighlight":{},
-                    "hover":{"contentFormat":["plaintext"]},
-                    "semanticTokens":{"requests":{"full":true},"tokenTypes":["namespace","type","class","enum","interface","struct","typeParameter","parameter","variable","property","enumMember","event","function","method","macro","keyword","modifier","comment","string","number","regexp","operator","decorator"],"tokenModifiers":["declaration","definition","readonly","static","deprecated","abstract","async","modification","documentation","defaultLibrary"],"formats":["relative"],"overlappingTokenSupport":false,"multilineTokenSupport":false}
-                },
-                "experimental":{"serverStatusNotification":true}
-            },
-            "initializationOptions":{"checkOnSave":false}
-        }))?;
-        let encoding = capabilities["capabilities"]["positionEncoding"]
-            .as_str()
-            .unwrap_or("utf-16");
-        if encoding != "utf-16" {
-            return Err(format!(
-                "unsupported rust-analyzer position encoding: {encoding}"
-            ));
-        }
-        let provider = &capabilities["capabilities"]["semanticTokensProvider"];
-        let semantic_tokens = !provider.is_null();
-        let token_types = strings(&provider["legend"]["tokenTypes"]);
-        let token_modifiers = strings(&provider["legend"]["tokenModifiers"]);
-        client.notify("initialized", json!({}))?;
-        client.wait_for_index()?;
         let project = project::Project::discover(&root, self.timeout)?;
-        self.root = Some(root);
-        self.project = Some(project);
-        self.transport = Some(client);
-        self.semantic_tokens = semantic_tokens;
-        self.token_types = token_types;
-        self.token_modifiers = token_modifiers;
-        self.opened.clear();
-        self.symbol_cache.clear();
-        self.token_cache.clear();
-        Ok(())
+        self.start_session(root, Some(project), None)
     }
 
     fn files(&mut self) -> Result<Vec<PathBuf>, String> {
+        if let Some(project) = &self.cpp_project {
+            return project.files(self.root.as_ref().ok_or("no project open")?);
+        }
         let project = self.project.as_ref().ok_or("no project open")?;
         let mut files = vec![];
         for package in &project.crates {
@@ -361,7 +472,7 @@ impl LanguageService for RustAnalyzer {
         }
         value
             .as_array()
-            .ok_or("Invalid document highlights from rust-analyzer")?
+            .ok_or("Invalid document highlights from language server")?
             .iter()
             .map(|highlight| {
                 let range = decode::<SourceRange>(&highlight["range"])?;
@@ -391,7 +502,7 @@ fn hover_contents(value: &Value) -> Result<Option<String>, String> {
             .get("value")
             .and_then(Value::as_str)
             .map(String::from)
-            .ok_or_else(|| "Invalid hover contents from rust-analyzer".into())
+            .ok_or_else(|| "Invalid hover contents from language server".into())
     }
     let text = content(&value["contents"])?;
     Ok((!text.trim().is_empty()).then_some(text))

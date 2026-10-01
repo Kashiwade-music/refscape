@@ -8,6 +8,25 @@ pub const SESSION_VERSION: u32 = 1;
 pub const MIN_ZOOM: f32 = 0.15;
 pub const MAX_ZOOM: f32 = 3.0;
 
+/// Language backend used to analyze a source project.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectLanguage {
+    #[default]
+    Auto,
+    Rust,
+    Cpp,
+}
+
+/// Analysis settings are independent of the source root and travel with sessions.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectOptions {
+    #[serde(default)]
+    pub language: ProjectLanguage,
+    #[serde(default)]
+    pub compilation_database: Option<PathBuf>,
+}
+
 /// Zero-based source coordinates. `character` counts UTF-16 code units (LSP).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Position {
@@ -370,6 +389,8 @@ impl Theme {
 pub struct Session {
     pub version: u32,
     pub project_root: PathBuf,
+    #[serde(default)]
+    pub project_options: ProjectOptions,
     pub cards: Vec<CodeCard>,
     pub connections: Vec<Connection>,
     #[serde(default)]
@@ -383,6 +404,7 @@ impl Session {
         Self {
             version: SESSION_VERSION,
             project_root,
+            project_options: ProjectOptions::default(),
             cards: Vec::new(),
             connections: Vec::new(),
             regions: Vec::new(),

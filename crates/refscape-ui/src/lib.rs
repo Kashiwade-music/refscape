@@ -2,9 +2,9 @@
 mod hover;
 mod input;
 mod runtime;
-pub use runtime::run;
 #[cfg(feature = "visual-tests")]
 pub use runtime::{render_snapshot, render_snapshot_with_selection};
+pub use runtime::{run, run_with_options};
 #[cfg(test)]
 mod tests;
 
@@ -19,7 +19,8 @@ use refscape_application::{
 };
 use refscape_model::{
     CODE_CARD_HEADER, CODE_LINE_HEIGHT, CODE_REGION_HEADER, CODE_REGION_PADDING, CodeCard,
-    ConnectionKind, Palette, Point, Position, Session, Symbol, Theme,
+    ConnectionKind, Palette, Point, Position, ProjectLanguage, ProjectOptions, Session, Symbol,
+    Theme,
 };
 use std::{
     ops::Range,
@@ -40,6 +41,38 @@ struct Output {
     protect_session: bool,
     inspection: Option<(u64, VariableInspection)>,
     error: bool,
+    opened_project: bool,
+    restore_session: Option<(PathBuf, PathBuf)>,
+}
+
+/// A successful backend switch must update its save destination even when enumeration fails.
+fn project_open_output<L: LanguageService, R: SessionRepository>(
+    explorer: &mut Explorer<L, R>,
+    session_path: PathBuf,
+    message: Option<String>,
+) -> Output {
+    let mut output = Output {
+        reset: true,
+        protect_session: message.is_some(),
+        message,
+        session_path: Some(session_path),
+        opened_project: true,
+        ..Default::default()
+    };
+    match explorer.files() {
+        Ok(files) => output.files = Some(files),
+        Err(error) => {
+            output.files = Some(vec![]);
+            output.error = true;
+            output.protect_session = true;
+            let error = format!("Project opened; source file listing failed: {error}");
+            output.message = Some(match output.message.take() {
+                Some(previous) => format!("{previous}\n{error}"),
+                None => error,
+            });
+        }
+    }
+    output
 }
 struct PaintedCard {
     id: String,
@@ -93,15 +126,38 @@ struct ExplorerView<L: LanguageService + 'static, R: SessionRepository + 'static
     bounds: Bounds<Pixels>,
     closing: bool,
     autosave: bool,
+    pending_project: Option<(PathBuf, PathBuf)>,
+    launch_options: ProjectOptions,
 }
 
 impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<L, R> {
     /// Indexing and initial session restoration begin after the window is created.
+    #[cfg(any(test, feature = "visual-tests"))]
     fn new(
         explorer: Explorer<L, R>,
         session_path: PathBuf,
         custom_themes: Vec<Theme>,
         initial_project: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_options(
+            explorer,
+            session_path,
+            custom_themes,
+            initial_project,
+            ProjectOptions::default(),
+            window,
+            cx,
+        )
+    }
+
+    fn new_with_options(
+        explorer: Explorer<L, R>,
+        session_path: PathBuf,
+        custom_themes: Vec<Theme>,
+        initial_project: Option<PathBuf>,
+        project_options: ProjectOptions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -130,7 +186,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             search_focus: false,
             focus,
             busy: false,
-            status: "Open a Rust project to start exploring.".into(),
+            status: "Open a Rust or C/C++ project to start exploring.".into(),
             error: false,
             selected: None,
             drag: None,
@@ -146,6 +202,8 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             bounds: Bounds::default(),
             closing: false,
             autosave: true,
+            pending_project: None,
+            launch_options: project_options.clone(),
         };
         if let Some(error) = layout_error {
             view.status = error;
@@ -157,7 +215,12 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                 .unwrap_or(true)
         });
         if let Some(path) = initial_project {
-            view.open_project(path, cx);
+            let session_path = if view.session_path.as_os_str().is_empty() {
+                path.join(".refscape/session.json")
+            } else {
+                view.session_path.clone()
+            };
+            view.open_project_with_session_options(path, session_path, project_options, cx);
         } else if !view.session.project_root.as_os_str().is_empty() {
             view.run_job(
                 "Loading project files…",
@@ -258,7 +321,15 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                             )
                         });
                         view.error = output.error;
+                        if output.opened_project {
+                            view.pending_project = None;
+                            view.launch_options = ProjectOptions::default();
+                        }
                         view.arrange_canvas();
+                        if let Some((root, path)) = output.restore_session {
+                            view.pending_project = Some((root.clone(), path.clone()));
+                            view.restore_session(root, path, cx);
+                        }
                     }
                     Ok((Err(error), mut session)) => {
                         if session.project_root == view.session.project_root {
@@ -288,24 +359,26 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         cx.notify();
     }
 
-    fn open_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.busy {
-            return;
-        }
-        let session_path = if self.session_path.as_os_str().is_empty() {
-            path.join(".refscape/session.json")
-        } else {
-            self.session_path.clone()
-        };
-        self.open_project_with_session(path, session_path, cx);
-    }
-
     fn open_project_with_session(
         &mut self,
         path: PathBuf,
         session_path: PathBuf,
         cx: &mut Context<Self>,
     ) {
+        self.open_project_with_session_options(path, session_path, self.launch_options.clone(), cx);
+    }
+
+    fn open_project_with_session_options(
+        &mut self,
+        path: PathBuf,
+        session_path: PathBuf,
+        options: ProjectOptions,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy || self.closing {
+            return;
+        }
+        self.pending_project = Some((path.clone(), session_path.clone()));
         let previous = if self.autosave && !self.session.project_root.as_os_str().is_empty() {
             Some(self.session_path.clone())
         } else {
@@ -316,34 +389,27 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         self.query_selection = 0..0;
         self.query_marked = None;
         self.run_job(
-            "Starting rust-analyzer and indexing project…",
+            "Starting language service and indexing project…",
             Box::new(move |explorer| {
-                if let Some(previous) = previous { explorer.save_session(&previous)?; }
-                explorer.open_project(&path)?;
-                let project_root = explorer.session().project_root.clone();
+                if let Some(previous) = previous {
+                    explorer.save_session(&previous)?;
+                }
                 let mut message = None;
+                let active_theme = explorer.session().theme.clone();
                 if session_path.is_file() {
-                    let active_theme = explorer.session().theme.clone();
-                    if let Err(error) = explorer.load_session(&session_path) {
+                    if let Err(error) =
+                        explorer.load_project_session(&session_path, &path, &options)
+                    {
+                        explorer.open_project_with_options(&path, &options)?;
                         message = Some(format!("Project opened; session restore failed: {error}"));
-                    }
-                    if explorer.session().project_root != project_root {
-                        explorer.open_project(&path)?;
-                        explorer.set_theme(active_theme.clone())?;
-                        message = Some("Project opened; saved session belongs to another project and was not restored.".into());
                     }
                     if active_theme != Theme::dark() && active_theme != Theme::light() {
                         explorer.set_theme(active_theme)?;
                     }
+                } else {
+                    explorer.open_project_with_options(&path, &options)?;
                 }
-                Ok(Output {
-                    files: Some(explorer.files()?),
-                    reset: true,
-                    protect_session: message.is_some(),
-                    message,
-                    session_path: Some(session_path),
-                    ..Default::default()
-                })
+                Ok(project_open_output(explorer, session_path, message))
             }),
             cx,
         );
@@ -357,7 +423,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Open Rust project".into()),
+            prompt: Some("Open Rust or C/C++ source folder".into()),
         });
         cx.spawn(async move |view, cx| match picker.await {
             Ok(Ok(Some(paths))) => {
@@ -384,6 +450,59 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             }
         })
         .detach();
+    }
+
+    fn pick_compilation_database(&mut self, cx: &mut Context<Self>) {
+        if self.busy || self.closing {
+            return;
+        }
+        if self.pending_project.is_none() && self.session.project_root.as_os_str().is_empty() {
+            self.status = "Open a source folder before selecting build settings.".into();
+            cx.notify();
+            return;
+        }
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Select compile_commands.json".into()),
+        });
+        cx.spawn(async move |view, cx| match picker.await {
+            Ok(Ok(Some(paths))) => {
+                if let Some(path) = paths.into_iter().next() {
+                    let _ = view.update(cx, |view, cx| {
+                        view.select_compilation_database(path, cx);
+                    });
+                }
+            }
+            Ok(Ok(None)) => {}
+            result => {
+                let _ = view.update(cx, |view, cx| {
+                    view.status = format!("Build settings picker failed: {result:?}");
+                    view.error = true;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn select_compilation_database(&mut self, database: PathBuf, cx: &mut Context<Self>) {
+        let project = self.pending_project.clone().or_else(|| {
+            (!self.session.project_root.as_os_str().is_empty())
+                .then(|| (self.session.project_root.clone(), self.session_path.clone()))
+        });
+        if let Some((root, session_path)) = project {
+            self.open_project_with_session_options(
+                root,
+                session_path,
+                ProjectOptions {
+                    language: ProjectLanguage::Cpp,
+                    compilation_database: Some(database),
+                },
+                cx,
+            );
+        }
     }
 
     fn search(&mut self, cx: &mut Context<Self>) {
@@ -465,30 +584,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                 Ok(Ok(Some(paths))) => {
                     if let Some(path) = paths.into_iter().next() {
                         let _ = view.update(cx, |view, cx| {
-                            let previous = if view.autosave
-                                && !view.session.project_root.as_os_str().is_empty()
-                                && view.session_path != path
-                            {
-                                Some(view.session_path.clone())
-                            } else {
-                                None
-                            };
-                            view.run_job(
-                                "Restoring session…",
-                                Box::new(move |explorer| {
-                                    if let Some(previous) = previous {
-                                        explorer.save_session(&previous)?;
-                                    }
-                                    explorer.load_session(&path)?;
-                                    Ok(Output {
-                                        files: Some(explorer.files()?),
-                                        reset: true,
-                                        session_path: Some(path),
-                                        ..Default::default()
-                                    })
-                                }),
-                                cx,
-                            );
+                            view.open_session(path, cx);
                         });
                     }
                 }
@@ -503,6 +599,43 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             })
             .detach();
         }
+    }
+
+    fn open_session(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.run_job(
+            "Reading session settings…",
+            Box::new(move |explorer| {
+                let root = explorer.session_project_root(&path)?;
+                Ok(Output {
+                    restore_session: Some((root, path)),
+                    ..Default::default()
+                })
+            }),
+            cx,
+        );
+    }
+
+    fn restore_session(&mut self, root: PathBuf, path: PathBuf, cx: &mut Context<Self>) {
+        let previous = if self.autosave
+            && !self.session.project_root.as_os_str().is_empty()
+            && self.session_path != path
+        {
+            Some(self.session_path.clone())
+        } else {
+            None
+        };
+        let options = self.launch_options.clone();
+        self.run_job(
+            "Restoring session…",
+            Box::new(move |explorer| {
+                if let Some(previous) = previous {
+                    explorer.save_session(&previous)?;
+                }
+                explorer.load_project_session(&path, &root, &options)?;
+                Ok(project_open_output(explorer, path, None))
+            }),
+            cx,
+        );
     }
 
     fn insertion_point(&self) -> Point {
@@ -1051,6 +1184,9 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                     .flex()
                     .gap_2()
                     .child(self.button("Open project", cx, |v, cx| v.pick_project(cx)))
+                    .child(self.button("Build settings", cx, |v, cx| {
+                        v.pick_compilation_database(cx)
+                    }))
                     .child(self.button("Save", cx, |v, cx| v.save(cx)))
                     .child(self.button("Save as", cx, |v, cx| v.pick_session(true, cx)))
                     .child(self.button("Open session", cx, |v, cx| v.pick_session(false, cx)))
@@ -1062,6 +1198,9 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                     )),
             );
         let sidebar = div().w(px(280.0)).h_full().flex_shrink_0().flex().flex_col().p_3().gap_3().bg(color(&palette.surface)).border_r_1().border_color(color(&palette.border))
+            .children((!root.as_os_str().is_empty()).then(||
+                div().text_size(px(10.0)).text_color(color(&palette.muted))
+                    .child(project_settings_label(&session.project_options))))
             .child(div().text_size(px(11.0)).text_color(color(&palette.muted)).child("FIND A STARTING POINT"))
             .child(div().id("search").h(px(36.0)).w_full().border_1().rounded_md().overflow_hidden().border_color(color(if focused { &palette.accent } else { &palette.border }))
                 .on_mouse_down(MouseButton::Left, cx.listener(|v, event: &MouseDownEvent, window, cx| { v.search_focus = true; window.focus(&v.focus, cx); if let (Some(bounds), Some(line)) = (v.query_bounds, &v.query_line) { let index = line.closest_index_for_x(event.position.x - bounds.left() - px(8.0)).min(v.query.len()); v.query_selection = index..index; } cx.notify(); }))
@@ -1217,7 +1356,12 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                                 "{}% · {} · {}",
                                 (self.session.viewport.zoom * 100.0).round(),
                                 if self.session.viewport.zoom < 0.35 {
-                                    "CRATES"
+                                    if self.session.project_options.language == ProjectLanguage::Cpp
+                                    {
+                                        "PROJECT"
+                                    } else {
+                                        "CRATES"
+                                    }
                                 } else if self.session.viewport.zoom < 0.65 {
                                     "MODULES"
                                 } else {
@@ -1232,6 +1376,17 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
 
 fn color(value: &str) -> gpui::Hsla {
     rgb(u32::from_str_radix(value.trim_start_matches('#'), 16).unwrap_or(0x808080)).into()
+}
+
+fn project_settings_label(options: &ProjectOptions) -> String {
+    match options.language {
+        ProjectLanguage::Auto => "Language: automatic".into(),
+        ProjectLanguage::Rust => "Rust · rust-analyzer".into(),
+        ProjectLanguage::Cpp => match &options.compilation_database {
+            Some(path) => format!("C/C++ · clangd\nBuild settings: {}", display_path(path)),
+            None => "C/C++ · clangd · project/default flags\nReferences and symbol search may be incomplete. Select Build settings to load compile_commands.json.".into(),
+        },
+    }
 }
 
 fn display_path(path: &std::path::Path) -> String {

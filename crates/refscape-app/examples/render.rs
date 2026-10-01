@@ -1,10 +1,10 @@
 //! Render a real GPUI scene into a PNG for visual verification.
-//! cargo run -p refscape-app --example render --features visual-tests -- PROJECT OUTPUT [light] [variable]
+//! cargo run -p refscape-app --example render --features visual-tests -- PROJECT OUTPUT [light] [variable] [--compile-commands PATH]
 use std::{env, path::PathBuf};
 
 use refscape_application::Explorer;
-use refscape_language::RustAnalyzer;
-use refscape_model::{Point, Theme};
+use refscape_language::LanguageBackend;
+use refscape_model::{Point, ProjectOptions, Theme};
 use refscape_storage::JsonSessionRepository;
 
 fn main() {
@@ -14,19 +14,45 @@ fn main() {
         .unwrap();
     let output = PathBuf::from(args.next().expect("OUTPUT required"));
     let options: Vec<_> = args.collect();
+    let database = options
+        .iter()
+        .position(|arg| arg == "--compile-commands")
+        .map(|index| {
+            PathBuf::from(
+                options
+                    .get(index + 1)
+                    .expect("--compile-commands requires a path"),
+            )
+        });
     let variable = options.iter().any(|s| s == "variable");
     let theme = if options.iter().any(|s| s == "light") {
         Theme::light()
     } else {
         Theme::dark()
     };
-    let mut explorer = Explorer::new(RustAnalyzer::default(), JsonSessionRepository);
-    explorer.open_project(&root).unwrap();
+    let mut explorer = Explorer::new(LanguageBackend::default(), JsonSessionRepository);
+    explorer
+        .open_project_with_options(
+            &root,
+            &ProjectOptions {
+                compilation_database: database,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     explorer.set_theme(theme).unwrap();
-    let symbols = explorer.search("main").unwrap();
-    let main = symbols
+    // Document symbols are available without waiting for clangd's background index.
+    let main = explorer
+        .files()
+        .unwrap()
         .into_iter()
-        .find(|s| s.name == "main")
+        .find_map(|path| {
+            explorer
+                .symbols(&path)
+                .unwrap()
+                .into_iter()
+                .find(|symbol| symbol.name == "main")
+        })
         .expect("project must define main");
     let main_path = main.path.clone();
     let id = explorer.add_symbol(main, Point::new(30.0, 70.0)).unwrap();

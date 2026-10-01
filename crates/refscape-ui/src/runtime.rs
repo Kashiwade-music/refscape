@@ -5,7 +5,7 @@ use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use refscape_application::{Explorer, LanguageService, SessionRepository};
 #[cfg(feature = "visual-tests")]
 use refscape_model::Position;
-use refscape_model::Theme;
+use refscape_model::{ProjectOptions, Theme};
 
 use crate::ExplorerView;
 
@@ -15,6 +15,23 @@ pub fn run<L: LanguageService + 'static, R: SessionRepository + 'static>(
     session_path: PathBuf,
     themes: Vec<Theme>,
     project: Option<PathBuf>,
+) -> Result<(), String> {
+    run_with_options(
+        explorer,
+        session_path,
+        themes,
+        project,
+        ProjectOptions::default(),
+    )
+}
+
+/// Open the explorer with language and compilation database overrides.
+pub fn run_with_options<L: LanguageService + 'static, R: SessionRepository + 'static>(
+    explorer: Explorer<L, R>,
+    session_path: PathBuf,
+    themes: Vec<Theme>,
+    project: Option<PathBuf>,
+    project_options: ProjectOptions,
 ) -> Result<(), String> {
     let launch_error = Rc::new(RefCell::new(None));
     let window_error = launch_error.clone();
@@ -34,7 +51,17 @@ pub fn run<L: LanguageService + 'static, R: SessionRepository + 'static>(
             },
             move |window, cx| {
                 window.set_window_title("Refscape");
-                cx.new(|cx| ExplorerView::new(explorer, session_path, themes, project, window, cx))
+                cx.new(|cx| {
+                    ExplorerView::new_with_options(
+                        explorer,
+                        session_path,
+                        themes,
+                        project,
+                        project_options,
+                        window,
+                        cx,
+                    )
+                })
             },
         ) {
             *window_error.borrow_mut() = Some(format!("cannot open window: {error}"));

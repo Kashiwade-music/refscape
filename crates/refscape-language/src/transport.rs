@@ -8,6 +8,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn installation_hint(server: &str) -> &'static str {
+    if server == "clangd" {
+        "Install clangd (LLVM) or set REFSCAPE_CLANGD to its executable"
+    } else {
+        "Install `rustup component add rust-analyzer` or set REFSCAPE_RUST_ANALYZER to its executable"
+    }
+}
+
 const MAX_MESSAGE: usize = 64 * 1024 * 1024;
 
 pub(crate) fn read_message(reader: &mut impl BufRead) -> Result<Value, String> {
@@ -17,7 +25,7 @@ pub(crate) fn read_message(reader: &mut impl BufRead) -> Result<Value, String> {
         let mut line = String::new();
         let read = reader.read_line(&mut line).map_err(|e| e.to_string())?;
         if read == 0 {
-            return Err("rust-analyzer closed its output stream".into());
+            return Err("language server closed its output stream".into());
         }
         header_bytes += read;
         if header_bytes > 8192 {
@@ -60,10 +68,15 @@ pub(crate) struct Transport {
     pub(crate) quiescent: bool,
     pub(crate) status: Option<String>,
     health: String,
+    server: &'static str,
 }
 
 impl Transport {
-    pub(crate) fn spawn(command: &mut Command, timeout: Duration) -> Result<Self, String> {
+    pub(crate) fn spawn(
+        command: &mut Command,
+        timeout: Duration,
+        server: &'static str,
+    ) -> Result<Self, String> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -73,10 +86,18 @@ impl Transport {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
-        let mut child = command.spawn().map_err(|e| format!("cannot start rust-analyzer: {e}; install `rustup component add rust-analyzer` or set REFSCAPE_RUST_ANALYZER"))?;
-        let writer = child.stdin.take().ok_or("missing rust-analyzer stdin")?;
-        let stdout = child.stdout.take().ok_or("missing rust-analyzer stdout")?;
-        let mut stderr_pipe = child.stderr.take().ok_or("missing rust-analyzer stderr")?;
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("cannot start {server}: {e}; {}", installation_hint(server)))?;
+        let writer = child.stdin.take().ok_or("missing language server stdin")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("missing language server stdout")?;
+        let mut stderr_pipe = child
+            .stderr
+            .take()
+            .ok_or("missing language server stderr")?;
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
@@ -118,6 +139,7 @@ impl Transport {
             quiescent: false,
             status: None,
             health: "ok".into(),
+            server,
         })
     }
 
@@ -134,10 +156,10 @@ impl Transport {
         let result = self
             .receiver
             .recv_timeout(duration)
-            .map_err(|e| format!("rust-analyzer response failed: {e}"))?;
+            .map_err(|e| format!("{} response failed: {e}", self.server))?;
         result.map_err(|e| {
             let log = self.stderr.lock().map(|s| s.clone()).unwrap_or_default();
-            format!("{e}. {log} Install `rustup component add rust-analyzer` or set REFSCAPE_RUST_ANALYZER to an executable.")
+            format!("{e}. {log} {}", installation_hint(self.server))
         })
     }
 
@@ -177,7 +199,7 @@ impl Transport {
             }
         }
         Err(format!(
-            "{method}: rust-analyzer repeatedly cancelled analysis; retry after indexing"
+            "{method}: language server repeatedly cancelled analysis; retry after indexing"
         ))
     }
 
@@ -185,7 +207,7 @@ impl Transport {
         let method = message["method"].as_str().unwrap_or("");
         if let Some(id) = message.get("id") {
             let result = match method {
-                "workspace/configuration" => Value::Array(message["params"]["items"].as_array().map(|items| items.iter().map(|_| json!({"checkOnSave":false})).collect()).unwrap_or_default()),
+                "workspace/configuration" => Value::Array(message["params"]["items"].as_array().map(|items| items.iter().map(|_| if self.server == "rust-analyzer" { json!({"checkOnSave":false}) } else { json!({}) }).collect()).unwrap_or_default()),
                 "workspace/workspaceFolders" => Value::Null,
                 "workspace/applyEdit" => json!({"applied":false,"failureReason":"Refscape is a read-only explorer"}),
                 "client/registerCapability" | "client/unregisterCapability" | "window/workDoneProgress/create" | "workspace/semanticTokens/refresh" | "workspace/inlayHint/refresh" | "workspace/diagnostic/refresh" | "workspace/codeLens/refresh" => Value::Null,
@@ -295,6 +317,7 @@ mod tests {
             quiescent: false,
             status: None,
             health: "ok".into(),
+            server: "rust-analyzer",
         };
         assert_eq!(client.request("example", json!({})).unwrap(), "done");
         assert!(client.quiescent);
@@ -326,6 +349,7 @@ mod tests {
             quiescent: false,
             status: None,
             health: "ok".into(),
+            server: "rust-analyzer",
         };
         assert_eq!(
             client.request("definition", json!({})).unwrap(),

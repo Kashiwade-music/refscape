@@ -1,5 +1,5 @@
 # Refscape
-A native spatial code explorer for navigating Rust through references and definitions.
+A native spatial code explorer for navigating Rust and C/C++ through references and definitions.
 
 ## 概要
 
@@ -39,7 +39,7 @@ Zoom Levelで表示階層を切り替える。
 
 ## 起動
 
-Windowsを優先したRust/Cargoプロジェクト向けの実装。ビルドにはRustup、MSVC C++ Build Tools、
+Windowsを優先したRust/CargoおよびC/C++プロジェクト向けの実装。Refscape自体のビルドにはRustup、MSVC C++ Build Tools、
 Windows SDKが必要。GPUIのプラットフォーム依存については
 [固定コミットのGPUI README](https://github.com/zed-industries/zed/blob/f8c2cc844057540ca1eac7de4f19f50d7597dead/crates/gpui/README.md)
 を参照。Rustはリポジトリの `rust-toolchain.toml` で `1.98.1` に固定している。
@@ -68,11 +68,58 @@ cargo build --release --locked
 .\target\release\refscape.exe examples/demo
 ```
 
-解析には `rust-analyzer` を使用し、ソースの構造を正規表現などで推測しない。
+Rustの解析には `rust-analyzer`、C/C++の解析には `clangd` を使用し、ソースの構造を正規表現などで推測しない。
 初回解析にはプロジェクトの依存取得・インデックス作成が必要になる。
 プロジェクトが独自のRust toolchainを指定する場合、そのtoolchainにも
 `rust-analyzer` と `rust-src` をインストールする。
 実行ファイルは `--rust-analyzer PATH` または `REFSCAPE_RUST_ANALYZER` 環境変数で指定できる。
+
+### C/C++プロジェクトを開く
+
+LLVMの `clangd` をインストールし、PATHに追加する。
+実行ファイルは `--clangd PATH` または `REFSCAPE_CLANGD` 環境変数で指定できる。
+Open projectでは、ビルドフォルダではなくソースのルートフォルダを選ぶ。
+CargoプロジェクトはRust、それ以外のC/C++ソースやビルド設定があるプロジェクトはC/C++として開く。
+言語を明示する場合は `--language rust` / `--language c` / `--language cpp` を使用する。
+
+```powershell
+# 既存のC/C++プロジェクト（コンパイル設定を自動検出）
+cargo run --locked -- "C:\code\my-cpp-project"
+
+# ソースとは別の場所にあるコンパイル設定を指定
+cargo run --locked -- "C:\code\my-cpp-project" --compile-commands "C:\build\debug\compile_commands.json"
+
+# C/C++を明示して、ウィンドウなしで解析とセッション復元を検証
+cargo run --locked -- --check "C:\code\my-cpp-project" --language cpp --compile-commands "C:\build\debug"
+```
+
+`compile_commands.json` は、各ソースのincludeパス、マクロ、言語規格などのコンパイル条件を持つ。
+ルート、`build/`、`build/` 直下の設定別フォルダ、`out/build/` とその直下から候補を探す。
+候補が1件なら自動で選び、複数ある場合はBuild settingsで使用するJSONを選択する。
+`--compile-commands` ではJSONファイルか、そのファイルがあるディレクトリを指定できる。
+選んだ言語と設定のパスはセッションに保存し、次回の復元で再利用する。
+CLIで明示した設定は保存済みの設定より優先する。
+
+設定がなくても簡易解析で開けるが、includeやマクロの不足で定義・型の解析が不完全になり得る。
+`compile_flags.txt` や `.clangd` もclangd側で利用する。
+ルートに `.clangd` がある場合、明示指定がなければdatabaseの選択をclangdに委ね、既存の設定を優先する。
+`compile_commands.json` がない場合、プロジェクト全体のバックグラウンド索引には制限がある。
+索引作成中の参照検索・シンボル検索は、索引が進むにつれて結果が増える。
+ヘッダーはコンパイル設定の一覧にない場合もファイル一覧に表示し、解析条件はclangdに委ねる。
+設定の形式とclangdの挙動は [clangdのプロジェクト設定](https://clangd.llvm.org/installation.html#project-setup) を参照。
+
+CMakeではNinjaまたはMakefile系のgeneratorでJSONを生成できる。
+Visual Studio generatorは `CMAKE_EXPORT_COMPILE_COMMANDS` に対応していない。
+通常は構成・生成の段階でJSONを作れるが、生成ヘッダーが必要なプロジェクトはビルドも必要。
+詳細は [CMakeの公式説明](https://cmake.org/cmake/help/latest/variable/CMAKE_EXPORT_COMPILE_COMMANDS.html) を参照。
+
+```powershell
+# Ninjaが利用できる環境で付属デモのコンパイル設定を生成
+cmake -S examples/cpp-demo -B examples/cpp-demo/build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cargo run --locked -- examples/cpp-demo
+```
+
+Refscapeはビルドを自動実行しない。既存の開発環境が生成したコンパイル設定を利用する。
 
 ## 操作
 
@@ -87,7 +134,7 @@ cargo build --release --locked
 縦横の空いたスペースを詰める。さらにクリックすると再表示する。
 カードを閉じると、そのカードから展開した子孫も閉じる。他のカードから接続されている子孫は残す。
 子カードはクリックしたコード行の高さを基準に右側へ配置し、ファイル領域の見出しと余白を含めて重なる場合は下へずらす。
-コードの単語に約400msホバーすると、rust-analyzerが返す型・シグネチャ・ドキュメントを表示する。
+コードの単語に約400msホバーすると、解析バックエンドが返す型・シグネチャ・ドキュメントを表示する。
 単語から説明へマウスを移してスクロールでき、単語と説明の両方から離れると少し待って閉じる。Escではすぐに閉じる。
 接続元のコード単語に下線を引き、その下線の右端から定義・参照の矢印を伸ばす。
 下線と接続位置はパン・ズームやカード移動に追従する。コードを省略するズーム階層では接続線も省略する。
@@ -114,8 +161,8 @@ cargo build --release --locked
 | Themeボタン | テーマを切り替える |
 
 65%以上のズームではソースコード、35～65%ではカードの概要、35%未満では領域を表示する。
-領域はCargo metadataに基づくworkspaceのcrate（Cargo package単位）と、
-ソースファイルごとにカードを包む。
+Rustの領域はCargo metadataに基づくworkspaceのcrate（Cargo package単位）と、
+ソースファイルごとにカードを包む。C/C++はプロジェクトとファイルの領域を表示する。
 解析中もCanvasを移動でき、解析・保存のエラーは下部のステータス欄に表示する。
 
 ## セッションとテーマ
@@ -151,8 +198,8 @@ cargo run --locked -- "C:\code\my-project" --theme my-theme.json
 - 多言語対応（C++/Python/TypeScript/React）
   - まずはRustから
 
-コード編集機能は持たない。言語解析はRustの `rust-analyzer` が対象。
-Windows以外のプラットフォームと他言語は将来の対応範囲。
+コード編集機能は持たない。言語解析はRustの `rust-analyzer` とC/C++の `clangd` が対象。
+Windows以外のプラットフォームとPython/TypeScriptなどの他言語は将来の対応範囲。
 GPUIが使う描画バックエンドに対応したGPUドライバーが必要。
 マクロ展開の仮想URIなど、実ファイルに対応しないソースへの移動は未対応で、
 解析バックエンドのエラーを画面に表示する。
@@ -182,12 +229,16 @@ cargo test -p refscape-language --locked --test rust_analyzer -- --ignored
 # 実プロジェクトのカード展開・重複防止・名前付きセッション復元を検証
 cargo test -p refscape-app --locked --test workflow -- --ignored
 
+# 実際のclangdでC/C++の解析とセッション復元を検証
+cargo test -p refscape-language --locked --test clangd -- --ignored
+cargo test -p refscape-app --locked --test cpp_workflow -- --ignored
+
 # ウィンドウを開かず、解析要求・Canvas操作・セッション復元を検証
 cargo run --locked -- --check "C:\code\my-project"
 ```
 
 `cargo xtask gate` が構造検査に成功すると、`docs/dependency-graph.md` を自動生成・更新する。
-実サーバーのテストは `rust-analyzer` が外部toolchain componentのため通常はignoreされる。
+実サーバーのテストは外部の `rust-analyzer` / `clangd` が必要なため通常はignoreされる。
 
 実GPUによる描画確認用のexampleも用意する。`main` を持つプロジェクトで、
 ライト／ダークのPNGを出力できる。GPUとデスクトップ環境が必要。
