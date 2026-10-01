@@ -8,7 +8,11 @@ use xtask::{check_architecture, dependency_graph, write_dependency_graph};
 
 const NAMES: &[&str] = &[
     "refscape-model",
+    "refscape-canvas",
     "refscape-application",
+    "refscape-lsp",
+    "refscape-language-rust",
+    "refscape-language-cpp",
     "refscape-language",
     "refscape-storage",
     "refscape-ui",
@@ -16,16 +20,37 @@ const NAMES: &[&str] = &[
 ];
 const EDGES: &[(&str, &[&str])] = &[
     ("refscape-model", &[]),
-    ("refscape-application", &["refscape-model"]),
+    ("refscape-canvas", &["refscape-model"]),
+    (
+        "refscape-application",
+        &["refscape-canvas", "refscape-model"],
+    ),
+    ("refscape-lsp", &["refscape-model"]),
+    (
+        "refscape-language-rust",
+        &["refscape-application", "refscape-lsp", "refscape-model"],
+    ),
+    (
+        "refscape-language-cpp",
+        &["refscape-application", "refscape-lsp", "refscape-model"],
+    ),
     (
         "refscape-language",
-        &["refscape-application", "refscape-model"],
+        &[
+            "refscape-application",
+            "refscape-language-rust",
+            "refscape-language-cpp",
+            "refscape-model",
+        ],
     ),
     (
         "refscape-storage",
         &["refscape-application", "refscape-model"],
     ),
-    ("refscape-ui", &["refscape-application", "refscape-model"]),
+    (
+        "refscape-ui",
+        &["refscape-application", "refscape-canvas", "refscape-model"],
+    ),
     (
         "refscape-app",
         &[
@@ -114,7 +139,7 @@ impl Drop for Fixture {
 fn valid_workspace_passes_without_fetching_the_reserved_gpui_dependency() {
     let fixture = Fixture::new();
     let report = check_architecture(&fixture.root).unwrap();
-    assert!(report.contains("6 product crates, 12 declared internal dependencies"));
+    assert!(report.contains("10 product crates, 24 declared internal dependencies"));
     assert!(report.contains("xtask isolated"));
     assert!(!fixture.root.join("Cargo.lock").exists());
 }
@@ -136,7 +161,7 @@ fn graph_contains_actual_edges_and_the_isolated_xtask() {
     assert!(graph.contains("refscape_model[\"refscape-model\"]"));
     assert!(graph.contains("refscape_ui -->|\"normal\"| refscape_application"));
     assert!(!graph.contains("refscape_ui -->|\"normal\"| refscape_model"));
-    assert_eq!(graph.matches(" -->|").count(), 11);
+    assert_eq!(graph.matches(" -->|").count(), 23);
     assert!(graph.contains("xtask[\"xtask\"]"));
     assert!(!graph.contains("xtask -->"));
     assert!(!graph.contains("gpui"));
@@ -426,6 +451,123 @@ fn acyclic_but_forbidden_dependency_is_rejected() {
 }
 
 #[test]
+fn adapters_cannot_depend_on_the_selector_even_in_tests() {
+    for adapter in ["refscape-language-rust", "refscape-language-cpp"] {
+        let fixture = Fixture::new();
+        fixture.append(
+            &format!("crates/{adapter}/Cargo.toml"),
+            "[dev-dependencies]\nrefscape-language.workspace = true\n",
+        );
+        let error = fixture.error();
+        assert!(error.contains("dependency cycle:"), "{error}");
+        assert!(
+            error.contains(&format!(
+                "forbidden dependency: {adapter} --dev--> refscape-language"
+            )),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn language_adapters_cannot_depend_on_each_other() {
+    for (from, to) in [
+        ("refscape-language-rust", "refscape-language-cpp"),
+        ("refscape-language-cpp", "refscape-language-rust"),
+    ] {
+        let fixture = Fixture::new();
+        fixture.append(
+            &format!("crates/{from}/Cargo.toml"),
+            &format!("{to}.workspace = true\n"),
+        );
+        let error = fixture.error();
+        assert!(!error.contains("dependency cycle:"), "{error}");
+        assert!(
+            error.contains(&format!("forbidden dependency: {from} --normal--> {to}")),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn common_lsp_cannot_depend_on_application() {
+    let fixture = Fixture::new();
+    fixture.append(
+        "crates/refscape-lsp/Cargo.toml",
+        "refscape-application.workspace = true\n",
+    );
+    let error = fixture.error();
+    assert!(!error.contains("dependency cycle:"), "{error}");
+    assert!(
+        error.contains("forbidden dependency: refscape-lsp --normal--> refscape-application"),
+        "{error}"
+    );
+}
+
+#[test]
+fn canvas_cannot_depend_on_application_even_in_tests() {
+    let fixture = Fixture::new();
+    fixture.append(
+        "crates/refscape-canvas/Cargo.toml",
+        "[dev-dependencies]\nrefscape-application.workspace = true\n",
+    );
+    let error = fixture.error();
+    assert!(error.contains("dependency cycle:"), "{error}");
+    assert!(
+        error.contains("forbidden dependency: refscape-canvas --dev--> refscape-application"),
+        "{error}"
+    );
+}
+
+#[test]
+fn executable_cannot_depend_on_concrete_rust_adapter() {
+    let fixture = Fixture::new();
+    fixture.append(
+        "crates/refscape-app/Cargo.toml",
+        "refscape-language-rust.workspace = true\n",
+    );
+    assert!(
+        fixture
+            .error()
+            .contains("forbidden dependency: refscape-app --normal--> refscape-language-rust")
+    );
+}
+
+#[test]
+fn executable_cannot_add_cpp_adapter_as_a_dev_dependency() {
+    let fixture = Fixture::new();
+    fixture.append(
+        "crates/refscape-app/Cargo.toml",
+        "[dev-dependencies]\nrefscape-language-cpp.workspace = true\n",
+    );
+    assert!(
+        fixture
+            .error()
+            .contains("forbidden dependency: refscape-app --dev--> refscape-language-cpp")
+    );
+}
+
+#[test]
+fn optional_target_test_dependencies_cannot_cycle_between_language_adapters() {
+    let fixture = Fixture::new();
+    fixture.append(
+        "crates/refscape-language-rust/Cargo.toml",
+        "[target.'cfg(windows)'.dependencies]\nrefscape-language-cpp = { workspace = true, optional = true }\n",
+    );
+    fixture.append(
+        "crates/refscape-language-cpp/Cargo.toml",
+        "[target.'cfg(unix)'.dev-dependencies]\nrefscape-language-rust.workspace = true\n",
+    );
+    let error = fixture.error();
+    assert!(error.contains("dependency cycle:"), "{error}");
+    assert!(
+        error.contains("normal, optional, target=cfg(windows)"),
+        "{error}"
+    );
+    assert!(error.contains("dev, target=cfg(unix)"), "{error}");
+}
+
+#[test]
 fn new_workspace_member_needs_an_explicit_policy() {
     let fixture = Fixture::new();
     fixture.write(
@@ -555,13 +697,44 @@ fn ui_cannot_use_a_registry_gpui_instead_of_the_pinned_source() {
 }
 
 #[test]
-fn lsp_protocol_types_are_confined_to_the_language_backend() {
+fn lsp_protocol_types_are_confined_to_common_lsp() {
     let fixture = Fixture::new();
     fixture.append(
         "crates/refscape-application/Cargo.toml",
         "lsp-types = \"0.97\"\n",
     );
-    assert!(fixture.error().contains("lsp-types is only allowed"));
+    assert!(
+        fixture
+            .error()
+            .contains("lsp-types is only allowed in refscape-lsp")
+    );
+}
+
+#[test]
+fn common_lsp_can_use_protocol_types() {
+    let fixture = Fixture::new();
+    fixture.append("crates/refscape-lsp/Cargo.toml", "lsp-types = \"0.97\"\n");
+    check_architecture(&fixture.root).unwrap();
+}
+
+#[test]
+fn language_selector_and_adapters_cannot_import_protocol_types_even_for_tests() {
+    for name in [
+        "refscape-language",
+        "refscape-language-rust",
+        "refscape-language-cpp",
+    ] {
+        let fixture = Fixture::new();
+        fixture.append(
+            &format!("crates/{name}/Cargo.toml"),
+            "[dev-dependencies]\nprotocol = { package = \"lsp-types\", version = \"0.97\" }\n",
+        );
+        assert!(
+            fixture
+                .error()
+                .contains("lsp-types is only allowed in refscape-lsp")
+        );
+    }
 }
 
 #[test]

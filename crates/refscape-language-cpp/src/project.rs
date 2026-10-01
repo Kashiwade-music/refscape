@@ -112,38 +112,17 @@ impl CppProject {
     }
 }
 
-pub(crate) fn detect_language(
-    root: &Path,
-    options: &ProjectOptions,
-) -> Result<ProjectLanguage, String> {
-    match options.language {
-        ProjectLanguage::Rust if options.compilation_database.is_some() => {
-            Err("A compilation database applies to C/C++; choose the C/C++ language".into())
-        }
-        ProjectLanguage::Rust | ProjectLanguage::Cpp => Ok(options.language),
-        ProjectLanguage::Auto if options.compilation_database.is_some() => Ok(ProjectLanguage::Cpp),
-        ProjectLanguage::Auto if root.join("Cargo.toml").is_file() => Ok(ProjectLanguage::Rust),
-        ProjectLanguage::Auto => {
-            if [
-                "CMakeLists.txt",
-                "CMakePresets.json",
-                ".clangd",
-                "compile_flags.txt",
-            ]
-            .iter()
-            .any(|name| root.join(name).is_file())
-                || !compilation_databases(root)?.is_empty()
-                || contains_cpp(root)?
-            {
-                Ok(ProjectLanguage::Cpp)
-            } else {
-                Err(format!(
-                    "Cannot detect a Rust or C/C++ project in {}. Select a source folder or choose its language explicitly",
-                    root.display()
-                ))
-            }
-        }
-    }
+pub(crate) fn supports(root: &Path) -> Result<bool, String> {
+    Ok([
+        "CMakeLists.txt",
+        "CMakePresets.json",
+        ".clangd",
+        "compile_flags.txt",
+    ]
+    .iter()
+    .any(|name| root.join(name).is_file())
+        || !compilation_databases(root)?.is_empty()
+        || contains_cpp(root)?)
 }
 
 /// Search conventional build locations without descending an arbitrary directory tree.
@@ -467,30 +446,11 @@ mod tests {
         );
     }
     #[test]
-    fn auto_detection_and_language_ids_cover_c_cpp_and_mixed_roots() {
+    fn detection_and_language_ids_cover_c_and_cpp() {
         let fixture = Fixture::new();
-        assert!(detect_language(&fixture.0, &ProjectOptions::default()).is_err());
+        assert!(!supports(&fixture.0).unwrap());
         fixture.write("src/main.c", "int main(void) { return 0; }");
-        assert_eq!(
-            detect_language(&fixture.0, &ProjectOptions::default()).unwrap(),
-            ProjectLanguage::Cpp
-        );
-        fixture.write("Cargo.toml", "");
-        assert_eq!(
-            detect_language(&fixture.0, &ProjectOptions::default()).unwrap(),
-            ProjectLanguage::Rust
-        );
-        assert_eq!(
-            detect_language(
-                &fixture.0,
-                &ProjectOptions {
-                    compilation_database: Some("build".into()),
-                    ..ProjectOptions::default()
-                }
-            )
-            .unwrap(),
-            ProjectLanguage::Cpp
-        );
+        assert!(supports(&fixture.0).unwrap());
         for (path, expected) in [
             ("a.c", "c"),
             ("a.C", "cpp"),

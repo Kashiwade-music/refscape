@@ -210,10 +210,12 @@ GPUIが使う描画バックエンドに対応したGPUドライバーが必要�
 
 ## 開発
 
-製品は6 crateのCargo workspaceで構成し、開発用の `xtask` は独立したworkspaceとする。
+製品は10 crateのCargo workspaceで構成し、開発用の `xtask` は独立したworkspaceとする。
+共通LSP処理とCanvas配置を独立させ、RustとC/C++の解析はそれぞれの言語crateが実装する。
+今後の言語も専用crateを追加し、選択層へ登録する。言語crate同士の依存と、全種類の内部依存の循環を禁止する。
 各crateの責務・依存方向・検査ルールは [アーキテクチャ](docs/architecture.md) を参照。
 1ソースファイルは空行・コメント・文字列を除いて `max_file_lines`（1000行）以下とし、子を持つRustモジュールは `<name>.rs` と `<name>/` の組で配置する。`mod.rs` は使わない。
-`cargo xtask gate` で検査し、既存の違反も失敗として報告する（分割・移動は後で一括対応）。
+`cargo xtask gate` で検査し、既存の違反も失敗として報告する。
 現在の依存宣言は [依存グラフ](docs/dependency-graph.md) にMermaidで出力する。
 
 Rust toolchainは `rust-toolchain.toml` に固定している。リポジトリのルートで次を実行する。
@@ -226,13 +228,13 @@ cargo xtask gate
 cargo run --locked
 
 # 実際のrust-analyzerで定義・参照・ハイライトを検証
-cargo test -p refscape-language --locked --test rust_analyzer -- --ignored
+cargo test -p refscape-language-rust --locked --test rust_analyzer -- --ignored
 
 # 実プロジェクトのカード展開・重複防止・名前付きセッション復元を検証
 cargo test -p refscape-app --locked --test workflow -- --ignored
 
 # 実際のclangdでC/C++の解析とセッション復元を検証
-cargo test -p refscape-language --locked --test clangd -- --ignored
+cargo test -p refscape-language-cpp --locked --test clangd -- --ignored
 cargo test -p refscape-app --locked --test cpp_workflow -- --ignored
 
 # ウィンドウを開かず、解析要求・Canvas操作・セッション復元を検証

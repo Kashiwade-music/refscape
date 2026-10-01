@@ -6,10 +6,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use refscape_application::Explorer;
-use refscape_language::RustAnalyzer;
-use refscape_model::{ConnectionKind, Point, Position, Theme};
-use refscape_storage::JsonSessionRepository;
+use refscape_application::explorer::Explorer;
+use refscape_language::LanguageBackend;
+use refscape_model::{ConnectionKind, Point, Position, ProjectOptions, Theme};
+use refscape_storage::session::JsonSessionRepository;
 
 struct Fixture {
     root: PathBuf,
@@ -66,9 +66,11 @@ impl Drop for Fixture {
 #[ignore = "requires rust-analyzer; run cargo test -p refscape-app --test workflow -- --ignored"]
 fn real_project_navigation_and_named_session_restore() {
     let fixture = Fixture::new();
-    let language = RustAnalyzer::default().with_timeout(Duration::from_secs(60));
+    let language = LanguageBackend::default().with_timeout(Duration::from_secs(60));
     let mut explorer = Explorer::new(language, JsonSessionRepository);
-    explorer.open_project(&fixture.root).unwrap();
+    explorer
+        .open_project(&fixture.root, &ProjectOptions::default())
+        .unwrap();
     assert_eq!(explorer.files().unwrap().len(), 2);
 
     let lib = fixture.root.join("src/lib.rs");

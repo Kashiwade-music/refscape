@@ -3,7 +3,11 @@ use std::{collections::BTreeMap, fs, path::Path};
 use cargo_metadata::{Dependency, DependencyKind, Metadata, MetadataCommand, Package};
 
 const MODEL: &str = "refscape-model";
+const CANVAS: &str = "refscape-canvas";
 const APPLICATION: &str = "refscape-application";
+const LSP: &str = "refscape-lsp";
+const RUST: &str = "refscape-language-rust";
+const CPP: &str = "refscape-language-cpp";
 const LANGUAGE: &str = "refscape-language";
 const STORAGE: &str = "refscape-storage";
 const UI: &str = "refscape-ui";
@@ -12,10 +16,14 @@ const APP: &str = "refscape-app";
 // A new member must be deliberately registered here; no default allow rule.
 const POLICY: &[(&str, &[&str])] = &[
     (MODEL, &[]),
-    (APPLICATION, &[MODEL]),
-    (LANGUAGE, &[APPLICATION, MODEL]),
+    (CANVAS, &[MODEL]),
+    (APPLICATION, &[CANVAS, MODEL]),
+    (LSP, &[MODEL]),
+    (RUST, &[APPLICATION, LSP, MODEL]),
+    (CPP, &[APPLICATION, LSP, MODEL]),
+    (LANGUAGE, &[APPLICATION, MODEL, RUST, CPP]),
     (STORAGE, &[APPLICATION, MODEL]),
-    (UI, &[APPLICATION, MODEL]),
+    (UI, &[APPLICATION, CANVAS, MODEL]),
     (APP, &[APPLICATION, LANGUAGE, MODEL, STORAGE, UI]),
 ];
 
@@ -474,8 +482,8 @@ fn check_external_boundary(name: &str, dependency: &Dependency, violations: &mut
             "{name}: GPUI dependencies are only allowed in {UI}"
         ));
     }
-    if dependency.name == "lsp-types" && name != LANGUAGE {
-        violations.push(format!("{name}: lsp-types is only allowed in {LANGUAGE}"));
+    if dependency.name == "lsp-types" && name != LSP {
+        violations.push(format!("{name}: lsp-types is only allowed in {LSP}"));
     }
 }
 

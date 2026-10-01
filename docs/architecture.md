@@ -5,27 +5,46 @@
 | crate | 責務 | 許可する内部依存 |
 |---|---|---|
 | `refscape-model` | UI非依存のソース位置・シンボル・カード・接続・領域・座標・ズーム・セッション・テーマのモデルと不変条件 | なし |
-| `refscape-application` | プロジェクト開始、定義展開、カード操作、セッション保存・復元などの操作と外部機能のtrait | `model` |
-| `refscape-language` | 言語解析・検索・定義・参照などのバックエンド、言語設定、バックエンド固有型と独自モデルの変換 | `application`, `model` |
-| `refscape-storage` | セッション・設定・テーマの保存形式、読み書き、バージョン移行 | `application`, `model` |
-| `refscape-ui` | GPUIによるCanvas・コードカード・接続線・入力・ハイライト・テーマの描画とネイティブウィンドウの起動・終了 | `application`, `model` |
-| `refscape-app` | 実行バイナリ `refscape`、CLIと具体的なアダプターの生成・接続 | 上記5 crate |
+| `refscape-canvas` | カード寸法、衝突回避、列の圧縮、接続元の配置基準、領域構築 | `model` |
+| `refscape-application` | プロジェクト開始、定義展開、カード操作、セッション保存・復元などの操作と外部機能のtrait | `canvas`, `model` |
+| `refscape-lsp` | JSON-RPC通信、文書状態とキャッシュ、共通LSP要求、応答と独自モデルの変換 | `model` |
+| `refscape-language-rust` | Cargoプロジェクト情報、Rustファイル検出、rust-analyzerの起動設定・固有通知、言語サービスの実装 | `application`, `lsp`, `model` |
+| `refscape-language-cpp` | C/C++ファイル検出、compilation database、clangdの起動設定、言語サービスの実装 | `application`, `lsp`, `model` |
+| `refscape-language` | プロジェクトの言語選択、選択した言語サービスへの委譲 | `application`, `language-rust`, `language-cpp`, `model` |
+| `refscape-storage` | セッション・設定・テーマの保存形式、読み書き、バージョン検査と原子的書き込み | `application`, `model` |
+| `refscape-ui` | GPUIによる描画・入力、背景処理と結果反映、一時的な表示状態、ネイティブウィンドウの起動・終了 | `application`, `canvas`, `model` |
+| `refscape-app` | 実行バイナリ `refscape`、CLIと具体的なアダプターの生成・接続 | `application`, `language`, `model`, `storage`, `ui` |
 | `xtask` | 構造検査、依存グラフの生成、開発用ゲート | 製品への依存なし |
 
 表の依存先は `refscape-` を省略したもの。許可する依存先の上限を示す。
-製品crateはRust/C/C++プロジェクトの解析、Canvas操作、バージョン付き永続化、GPUIの画面を実装する。
+製品は10 crateでRust/C/C++プロジェクトの解析、Canvas操作、バージョン付き永続化、GPUIの画面を実装する。
 
-`application` が `LanguageService` や `SessionRepository` といったtraitを定義し、
-`language` と `storage` がそれを実装する。`app` が具体的な実装を生成して渡す。
+`application::ports` が `LanguageService` や `SessionRepository` といったtraitを定義し、
+言語ごとのcrateと `storage` がそれを実装する。`language` は言語選択とサービスへの委譲を行い、
+`app` が選択サービスと保存の実装を生成して `application::explorer::Explorer` に渡す。
 `application` から具体的なアダプターへ依存しない。
 
-GPUIの型・直接依存は `ui` に閉じ込める。`app` はUI非依存の引数を `refscape_ui::run` に渡して起動し、
-画像出力も `refscape_ui::render_snapshot` を呼ぶ。言語バックエンド固有の型は `language` の境界で独自モデルに変換する。
+GPUIの型・直接依存は `ui` に閉じ込める。`app` はUI非依存の引数を `refscape_ui::runtime::run` に渡して起動する。
+共通LSP応答は `lsp` の境界で独自モデルに変換し、サーバー固有の設定や通知は各言語crateが扱う。
 LSPは言語バックエンドの一つとし、将来はコンパイラAPIなどの公式機能を使うバックエンドも追加できる。
-バックエンドの規模が大きくなった場合は、それぞれを別crateへ分離する。
-Canvasの状態や配置規則はUI非依存とし、ファイルの保存形式と移行処理は `storage` が管理する。
+言語crate同士の依存、および言語crateから選択層 `language` への依存は認めない。
+`lsp` は具体的な言語や `LanguageService` を知らず、`canvas` は `Explorer` やGPUIの型を受け取らない。
+Canvasの状態は `model`、配置規則は `canvas`、ファイルの保存形式は `storage` が管理する。
 テーマの意味的な定義は `model`、保存は `storage`、描画用の型への変換は `ui` が担当する。
 コードの構造解析はREADMEの方針に従いLSP等の公式機能を利用し、未対応の機能を推測で補わない。
+
+## 言語を追加する手順
+
+1. `crates/refscape-language-<name>` を作り、ルートworkspaceと `[workspace.dependencies]` に登録する。
+2. `application::ports::LanguageService` を実装し、プロジェクトの検出・設定検証・解析プロセスの生成をそのcrateに置く。
+3. LSPを使う場合は `lsp` の共通セッションを利用し、サーバー固有の初期化設定・通知を言語側で定義する。
+4. `language` の選択処理に新しい候補を登録し、必要な言語設定を `model` に追加する。混在プロジェクトの優先順位と明示指定も選択層で決める。
+5. `xtask/src/architecture.rs` の `POLICY` に新crateと選択層からの依存を登録し、構造検査のfixtureとこの責務表を更新する。
+6. 新crateに言語固有の単体・実サーバーテストを追加し、`app` から選択層を通した操作も検証する。`cargo xtask gate` で依存図を生成して確認する。
+
+共通LSPを利用しない公式コンパイラAPIの実装も同じ言語サービスの境界で接続できる。
+下位crateのテストから選択層や `app` へ依存しない。結合テストは `app/tests` に置き、
+言語間で共有する通信・応答変換だけを `lsp` に置く。旧APIへの再エクスポートや引数変換の互換ラッパーは設けない。
 
 ## データと操作の境界
 
@@ -36,7 +55,7 @@ Canvasの状態や配置規則はUI非依存とし、ファイルの保存形式
 
 `Explorer` は定義・参照の展開、同じシンボルの重複防止、接続の追加、
 カードの移動・削除、カーソルを基準にしたズームを扱う。
-新しいカードの寸法はソース全体を読める大きさにし、既存カードとの衝突を避けて配置する。
+`canvas` は新しいカードの寸法をソース全体を読める大きさにし、既存カードとの衝突を避けて配置する。
 カードの非表示・削除後は、カード左端の位置から残った列を判定し、列と列内の読み順を保って配置を再計算する。
 列内の最大幅に合わせて横方向の空きを詰め、幅の広いカードによって隣の列が同じ列にまとめられることを防ぐ。
 縦方向の間隔には、描画と共有するファイル領域の見出しと余白を含める。
@@ -58,12 +77,13 @@ hoverはplain textを要求し、型・ドキュメントを返す。UIはホバ
 単語から説明へポインターを移すための猶予を設け、説明内のスクロールはCanvasに伝播させない。
 単語と説明から離れたときは遅延して閉じ、Canvas操作では古い要求・説明を直ちに破棄する。
 JSON-RPCのフレーミング、要求ID、サーバーからの要求、タイムアウト、終了処理は
-`language/src/transport.rs` にまとめる。外部ファイルの更新時には解析キャッシュを無効にする。
+`lsp` にまとめる。言語固有の初期化設定や通知の扱いは言語crateから渡す。
+外部ファイルの更新時には解析キャッシュを無効にする。
 仮想URIのマクロ展開など、ファイル上のソースに変換できない応答は明示的なエラーにする。
 
 ソースルートとコンパイル設定の場所は独立して保持する。
 `ProjectOptions` は言語と任意のcompilation databaseのパスを持つUI非依存モデルであり、
-検出・形式の検証・clangdの起動引数への変換は `language` が担う。
+検出・形式の検証・clangdの起動引数への変換は `language-cpp` が担う。
 C/C++のファイル一覧はソースツリーのソース・ヘッダーとcompilation databaseのソースを用い、
 コードの構造と関係の解析はclangdに委ねる。Cargoのパッケージ境界を推測で代用しない。
 clangdの索引はバックグラウンドで作成し、Rust専用の解析完了通知は待たない。
@@ -72,7 +92,7 @@ clangdの索引はバックグラウンドで作成し、Rust専用の解析完�
 
 永続化はバージョン1のJSON形式で、セッション・テーマ・設定のバージョンを個別に検査する。
 現在のバージョン以外を読み込む移行処理はまだ持たず、未対応バージョンは拒否する。
-セッションの解析設定と設定ファイルのclangd実行パスは省略可能な追加フィールドとし、旧バージョン1の文書も読み込める。
+セッションの解析設定と設定ファイルのclangd実行パスを保持する。
 書き込みは同じディレクトリの一時ファイルを同期してからrenameし、以前のファイルを先に削除しない。
 
 ## WorkspaceとGPUI
@@ -122,7 +142,7 @@ Rustファイルを含まない資産ディレクトリには親 `.rs` を要求
 コンパイル対象のRustモジュールに対して適用され、既存lintの独自再実装は持たない。
 
 全違反をパス・行数または必要な親ファイルとともに表示し、非ゼロ終了する。
-既存の違反にも適用し、免除リストや自動修正は設けない。既存ファイルの分割・移動は後で一括して行う。
+既存の違反にも適用し、免除リストや自動修正は設けない。
 
 ## 構造検査
 
@@ -152,7 +172,8 @@ cargo xtask gate
 未登録のローカルpath依存や製品から `xtask` への依存も許可しない。
 `xtask` 自身も独立した単一packageのworkspaceであることと、製品・ローカルcrateに依存しないことを検査する。
 
-外部依存についてはGPUI系の直接依存を `ui`、`lsp-types` の直接依存を `language` に限定する。
+外部依存についてはGPUI系の直接依存を `ui`、`lsp-types` の直接依存を `lsp` に限定する。
+現在の共通LSP実装はJSONを使い、`lsp-types` を直接依存に持たない。
 GPUI系はUI内に直接定義したZedの完全なコミットSHAのみ許可し、全宣言のSHA一致も検査する。
 GPUI系を `workspace.dependencies` に戻す宣言も、未使用・別名を含め拒否する。
 検査の保証対象は製品workspaceの内部依存宣言であり、外部ライブラリ全体の循環検査ではない。
@@ -180,7 +201,7 @@ cargo xtask gate
 許可リストをそのまま図示せず、manifestで宣言されている依存だけをMermaidの矢印にする。
 矢印は依存するcrateから依存先へ向かい、ラベルに依存種別・optional・target条件を表示する。
 内部依存の章では独立workspaceの `xtask` を製品と接続のないノードとして表示する。
-新しい `Direct external dependencies` 章では製品各crateと `xtask` の直接外部依存をMermaidで表示する。
+`Direct external dependencies` 章では製品各crateと `xtask` の直接外部依存をMermaidで表示する。
 normal・dev・build・optional・target条件に加え、別名は `alias`、workspace継承は `workspace` と表示する。
 推移依存と未使用の共通定義は含めず、同じpackage名は一つの外部ノードにまとめる。
 順序は固定し、日時やローカルの絶対パスを出力しない。生成ファイルは手動編集しない。
@@ -216,5 +237,5 @@ cargo fmt --manifest-path xtask/Cargo.toml --all
 xtaskの公開コマンドは `cargo xtask gate` のみとする。
 依存宣言を変更したらゲートを実行し、生成された図を含めて変更を確認する。
 
-通常のゲートは外部のrust-analyzerが必要なテストをignoreするので、
+通常のゲートは外部のrust-analyzer・clangdが必要なテストをignoreするので、
 ローカルで実行する場合はREADMEの追加テストコマンドを使う。

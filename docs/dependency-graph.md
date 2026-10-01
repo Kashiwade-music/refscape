@@ -14,7 +14,11 @@ flowchart TD
     subgraph product["Product workspace"]
         refscape_app["refscape-app"]
         refscape_application["refscape-application"]
+        refscape_canvas["refscape-canvas"]
         refscape_language["refscape-language"]
+        refscape_language_cpp["refscape-language-cpp"]
+        refscape_language_rust["refscape-language-rust"]
+        refscape_lsp["refscape-lsp"]
         refscape_model["refscape-model"]
         refscape_storage["refscape-storage"]
         refscape_ui["refscape-ui"]
@@ -23,12 +27,24 @@ flowchart TD
         refscape_app -->|"normal"| refscape_model
         refscape_app -->|"normal"| refscape_storage
         refscape_app -->|"normal"| refscape_ui
+        refscape_application -->|"normal"| refscape_canvas
         refscape_application -->|"normal"| refscape_model
+        refscape_canvas -->|"normal"| refscape_model
         refscape_language -->|"normal"| refscape_application
+        refscape_language -->|"normal"| refscape_language_cpp
+        refscape_language -->|"normal"| refscape_language_rust
         refscape_language -->|"normal"| refscape_model
+        refscape_language_cpp -->|"normal"| refscape_application
+        refscape_language_cpp -->|"normal"| refscape_lsp
+        refscape_language_cpp -->|"normal"| refscape_model
+        refscape_language_rust -->|"normal"| refscape_application
+        refscape_language_rust -->|"normal"| refscape_lsp
+        refscape_language_rust -->|"normal"| refscape_model
+        refscape_lsp -->|"normal"| refscape_model
         refscape_storage -->|"normal"| refscape_application
         refscape_storage -->|"normal"| refscape_model
         refscape_ui -->|"normal"| refscape_application
+        refscape_ui -->|"normal"| refscape_canvas
         refscape_ui -->|"normal"| refscape_model
     end
     subgraph tooling["Tooling workspace"]
@@ -48,7 +64,11 @@ flowchart LR
     subgraph product["Product workspace"]
         refscape_app["refscape-app"]
         refscape_application["refscape-application"]
+        refscape_canvas["refscape-canvas"]
         refscape_language["refscape-language"]
+        refscape_language_cpp["refscape-language-cpp"]
+        refscape_language_rust["refscape-language-rust"]
+        refscape_lsp["refscape-lsp"]
         refscape_model["refscape-model"]
         refscape_storage["refscape-storage"]
         refscape_ui["refscape-ui"]
@@ -64,8 +84,11 @@ flowchart LR
         external_4["serde_json"]
         external_5["toml"]
     end
-    refscape_language -->|"normal, workspace"| external_3
-    refscape_language -->|"normal, workspace"| external_4
+    refscape_language_cpp -->|"normal, workspace"| external_4
+    refscape_language_rust -->|"normal, workspace"| external_3
+    refscape_language_rust -->|"normal, workspace"| external_4
+    refscape_lsp -->|"normal, workspace"| external_3
+    refscape_lsp -->|"normal, workspace"| external_4
     refscape_model -->|"normal, workspace"| external_3
     refscape_storage -->|"normal, workspace"| external_3
     refscape_storage -->|"normal, workspace"| external_4

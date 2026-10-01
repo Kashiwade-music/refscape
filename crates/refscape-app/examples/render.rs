@@ -2,10 +2,10 @@
 //! cargo run -p refscape-app --example render --features visual-tests -- PROJECT OUTPUT [light] [variable] [--compile-commands PATH]
 use std::{env, path::PathBuf};
 
-use refscape_application::Explorer;
+use refscape_application::explorer::Explorer;
 use refscape_language::LanguageBackend;
 use refscape_model::{Point, ProjectOptions, Theme};
-use refscape_storage::JsonSessionRepository;
+use refscape_storage::session::JsonSessionRepository;
 
 fn main() {
     let mut args = env::args_os().skip(1);
@@ -32,7 +32,7 @@ fn main() {
     };
     let mut explorer = Explorer::new(LanguageBackend::default(), JsonSessionRepository);
     explorer
-        .open_project_with_options(
+        .open_project(
             &root,
             &ProjectOptions {
                 compilation_database: database,
@@ -108,7 +108,7 @@ fn main() {
         explorer.session().cards.len(),
         main_path.display()
     );
-    refscape_ui::render_snapshot_with_selection(
+    refscape_ui::runtime::render_snapshot(
         explorer,
         root.join(".refscape/session.json"),
         output,

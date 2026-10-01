@@ -8,13 +8,24 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn installation_hint(server: &str) -> &'static str {
-    if server == "clangd" {
-        "Install clangd (LLVM) or set REFSCAPE_CLANGD to its executable"
-    } else {
-        "Install `rustup component add rust-analyzer` or set REFSCAPE_RUST_ANALYZER to its executable"
+/// Server-specific configuration and readiness, supplied by the language backend.
+pub trait ServerBehavior: Send {
+    fn configuration(&self, _section: Option<&str>) -> Value {
+        json!({})
+    }
+
+    fn notification(&mut self, _method: &str, _params: &Value) {}
+
+    fn ready(&self) -> Result<bool, String> {
+        Ok(true)
     }
 }
+
+/// Behavior for servers without additional configuration or readiness messages.
+#[derive(Default)]
+pub struct DefaultServerBehavior;
+
+impl ServerBehavior for DefaultServerBehavior {}
 
 const MAX_MESSAGE: usize = 64 * 1024 * 1024;
 
@@ -58,25 +69,28 @@ fn write_message(writer: &mut impl Write, message: &Value) -> Result<(), String>
     writer.flush().map_err(|e| e.to_string())
 }
 
-pub(crate) struct Transport {
+pub struct Transport {
     child: Option<Child>,
     writer: Box<dyn Write + Send>,
     receiver: mpsc::Receiver<Result<Value, String>>,
     stderr: Arc<Mutex<String>>,
     next_id: u64,
-    pub(crate) timeout: Duration,
-    pub(crate) quiescent: bool,
-    pub(crate) status: Option<String>,
-    health: String,
-    server: &'static str,
+    timeout: Duration,
+    server: String,
+    installation_hint: String,
+    behavior: Box<dyn ServerBehavior>,
 }
 
 impl Transport {
-    pub(crate) fn spawn(
+    pub fn spawn(
         command: &mut Command,
         timeout: Duration,
-        server: &'static str,
+        server: impl Into<String>,
+        installation_hint: impl Into<String>,
+        behavior: Box<dyn ServerBehavior>,
     ) -> Result<Self, String> {
+        let server = server.into();
+        let installation_hint = installation_hint.into();
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -88,7 +102,7 @@ impl Transport {
         }
         let mut child = command
             .spawn()
-            .map_err(|e| format!("cannot start {server}: {e}; {}", installation_hint(server)))?;
+            .map_err(|e| format!("cannot start {server}: {e}; {installation_hint}"))?;
         let writer = child.stdin.take().ok_or("missing language server stdin")?;
         let stdout = child
             .stdout
@@ -136,14 +150,13 @@ impl Transport {
             stderr,
             next_id: 0,
             timeout,
-            quiescent: false,
-            status: None,
-            health: "ok".into(),
             server,
+            installation_hint,
+            behavior,
         })
     }
 
-    pub(crate) fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
+    pub fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
         self.send(&json!({"jsonrpc":"2.0","method":method,"params":params}))
     }
 
@@ -159,11 +172,11 @@ impl Transport {
             .map_err(|e| format!("{} response failed: {e}", self.server))?;
         result.map_err(|e| {
             let log = self.stderr.lock().map(|s| s.clone()).unwrap_or_default();
-            format!("{e}. {log} {}", installation_hint(self.server))
+            format!("{e}. {log} {}", self.installation_hint)
         })
     }
 
-    pub(crate) fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+    pub fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
         let deadline = Instant::now() + self.timeout;
         // Servers may cancel a request while reloading the workspace; retry with a new id.
         for _ in 0..4 {
@@ -206,37 +219,51 @@ impl Transport {
     fn handle_server_message(&mut self, message: &Value) -> Result<(), String> {
         let method = message["method"].as_str().unwrap_or("");
         if let Some(id) = message.get("id") {
+            // Responses received while waiting for readiness can be safely ignored.
+            if method.is_empty() {
+                return Ok(());
+            }
             let result = match method {
-                "workspace/configuration" => Value::Array(message["params"]["items"].as_array().map(|items| items.iter().map(|_| if self.server == "rust-analyzer" { json!({"checkOnSave":false}) } else { json!({}) }).collect()).unwrap_or_default()),
+                "workspace/configuration" => Value::Array(
+                    message["params"]["items"]
+                        .as_array()
+                        .map(|items| {
+                            items
+                                .iter()
+                                .map(|item| self.behavior.configuration(item["section"].as_str()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                ),
                 "workspace/workspaceFolders" => Value::Null,
-                "workspace/applyEdit" => json!({"applied":false,"failureReason":"Refscape is a read-only explorer"}),
-                "client/registerCapability" | "client/unregisterCapability" | "window/workDoneProgress/create" | "workspace/semanticTokens/refresh" | "workspace/inlayHint/refresh" | "workspace/diagnostic/refresh" | "workspace/codeLens/refresh" => Value::Null,
-                _ => return self.send(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Unsupported client request"}})),
+                "workspace/applyEdit" => {
+                    json!({"applied":false,"failureReason":"Refscape is a read-only explorer"})
+                }
+                "client/registerCapability"
+                | "client/unregisterCapability"
+                | "window/workDoneProgress/create"
+                | "workspace/semanticTokens/refresh"
+                | "workspace/inlayHint/refresh"
+                | "workspace/diagnostic/refresh"
+                | "workspace/codeLens/refresh" => Value::Null,
+                _ => {
+                    return self.send(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Unsupported client request"}}));
+                }
             };
             self.send(&json!({"jsonrpc":"2.0","id":id,"result":result}))?;
-        } else if method == "experimental/serverStatus" {
-            self.quiescent = message["params"]["quiescent"].as_bool().unwrap_or(false);
-            self.status = message["params"]["message"].as_str().map(str::to_owned);
-            self.health = message["params"]["health"].as_str().unwrap_or("ok").into();
+        } else if !method.is_empty() {
+            self.behavior.notification(method, &message["params"]);
         }
         Ok(())
     }
 
-    pub(crate) fn wait_for_index(&mut self) -> Result<(), String> {
+    pub fn wait_until_ready(&mut self) -> Result<(), String> {
         let deadline = Instant::now() + self.timeout;
-        while !self.quiescent {
+        while !self.behavior.ready()? {
             let message = self
                 .receive(deadline)
-                .map_err(|e| format!("waiting for Rust project analysis: {e}"))?;
+                .map_err(|e| format!("waiting for {} project analysis: {e}", self.server))?;
             self.handle_server_message(&message)?;
-        }
-        if self.health == "error" {
-            return Err(format!(
-                "rust-analyzer cannot analyze this project: {}",
-                self.status
-                    .as_deref()
-                    .unwrap_or("check Cargo.toml and the Rust toolchain")
-            ));
         }
         Ok(())
     }
@@ -272,6 +299,72 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    #[derive(Default)]
+    struct ExampleBehavior {
+        ready: bool,
+        error: Option<String>,
+    }
+
+    impl ServerBehavior for ExampleBehavior {
+        fn configuration(&self, section: Option<&str>) -> Value {
+            json!({"section":section,"enabled":true})
+        }
+
+        fn notification(&mut self, method: &str, params: &Value) {
+            if method == "example/analysisStatus" {
+                self.ready = params["ready"].as_bool().unwrap_or(false);
+                self.error = params["error"].as_str().map(str::to_owned);
+            }
+        }
+
+        fn ready(&self) -> Result<bool, String> {
+            match &self.error {
+                Some(error) => Err(error.clone()),
+                None => Ok(self.ready),
+            }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedOutput(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedOutput {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn client(
+        behavior: Box<dyn ServerBehavior>,
+    ) -> (
+        Transport,
+        mpsc::Sender<Result<Value, String>>,
+        CapturedOutput,
+    ) {
+        let (sender, receiver) = mpsc::channel();
+        let output = CapturedOutput::default();
+        (
+            Transport {
+                child: None,
+                writer: Box::new(output.clone()),
+                receiver,
+                stderr: Arc::default(),
+                next_id: 0,
+                timeout: Duration::from_millis(20),
+                server: "example-server".into(),
+                installation_hint: "Install example-server".into(),
+                behavior,
+            },
+            sender,
+            output,
+        )
+    }
+
     #[test]
     fn framing_preserves_utf8_and_consecutive_messages() {
         let value = json!({"text":"🦀 日本語"});
@@ -296,36 +389,53 @@ mod tests {
     }
 
     #[test]
-    fn request_pump_answers_server_requests_and_ignores_stale_responses() {
-        let (sender, receiver) = mpsc::channel();
+    fn request_pump_answers_configuration_and_ignores_stale_responses() {
+        let (mut client, sender, output) = client(Box::<ExampleBehavior>::default());
         for value in [
             json!({"id":99,"result":"stale"}),
-            json!({"id":"cfg","method":"workspace/configuration","params":{"items":[{}]}}),
-            json!({"method":"experimental/serverStatus","params":{"quiescent":true}}),
+            json!({"id":"cfg","method":"workspace/configuration","params":{"items":[{"section":"example"},{}]}}),
+            json!({"method":"example/analysisStatus","params":{"ready":true}}),
             json!({"id":1,"result":"done"}),
-            json!({"id":2,"result":null}),
         ] {
             sender.send(Ok(value)).unwrap();
         }
-        let mut client = Transport {
-            child: None,
-            writer: Box::new(vec![]),
-            receiver,
-            stderr: Arc::default(),
-            next_id: 0,
-            timeout: Duration::from_millis(20),
-            quiescent: false,
-            status: None,
-            health: "ok".into(),
-            server: "rust-analyzer",
-        };
         assert_eq!(client.request("example", json!({})).unwrap(), "done");
-        assert!(client.quiescent);
+        client.wait_until_ready().unwrap();
+        let mut bytes = Cursor::new(output.0.lock().unwrap().clone());
+        assert_eq!(read_message(&mut bytes).unwrap()["method"], "example");
+        assert_eq!(
+            read_message(&mut bytes).unwrap(),
+            json!({"jsonrpc":"2.0","id":"cfg","result":[{"section":"example","enabled":true},{"section":null,"enabled":true}]})
+        );
+    }
+
+    #[test]
+    fn readiness_wait_pumps_requests_and_propagates_backend_errors() {
+        let (mut client, sender, _) = client(Box::<ExampleBehavior>::default());
+        sender.send(Ok(json!({"id":"progress","method":"window/workDoneProgress/create","params":{"token":1}}))).unwrap();
+        sender.send(Ok(json!({"id":99,"result":"stale"}))).unwrap();
+        sender
+            .send(Ok(
+                json!({"method":"example/analysisStatus","params":{"ready":true}}),
+            ))
+            .unwrap();
+        client.wait_until_ready().unwrap();
+        client.handle_server_message(&json!({"method":"example/analysisStatus","params":{"ready":true,"error":"project load failed"}})).unwrap();
+        assert_eq!(
+            client.wait_until_ready().unwrap_err(),
+            "project load failed"
+        );
+    }
+
+    #[test]
+    fn default_behavior_is_ready_without_notifications() {
+        let (mut client, _, _) = client(Box::new(DefaultServerBehavior));
+        client.wait_until_ready().unwrap();
     }
 
     #[test]
     fn cancelled_requests_retry_but_server_errors_and_deadlines_propagate() {
-        let (sender, receiver) = mpsc::channel();
+        let (mut client, sender, _) = client(Box::new(DefaultServerBehavior));
         sender
             .send(Ok(
                 json!({"id":1,"error":{"code":-32801,"message":"content changed"}}),
@@ -339,18 +449,6 @@ mod tests {
                 json!({"id":3,"error":{"code":-32602,"message":"invalid position"}}),
             ))
             .unwrap();
-        let mut client = Transport {
-            child: None,
-            writer: Box::new(vec![]),
-            receiver,
-            stderr: Arc::default(),
-            next_id: 0,
-            timeout: Duration::from_millis(10),
-            quiescent: false,
-            status: None,
-            health: "ok".into(),
-            server: "rust-analyzer",
-        };
         assert_eq!(
             client.request("definition", json!({})).unwrap(),
             json!(["retry succeeded"])

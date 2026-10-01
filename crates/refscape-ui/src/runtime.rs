@@ -2,31 +2,18 @@
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
-use refscape_application::{Explorer, LanguageService, SessionRepository};
+use refscape_application::{
+    explorer::Explorer,
+    ports::{LanguageService, SessionRepository},
+};
 #[cfg(feature = "visual-tests")]
 use refscape_model::Position;
 use refscape_model::{ProjectOptions, Theme};
 
-use crate::ExplorerView;
-
-/// Open the explorer window with adapters composed by the executable.
-pub fn run<L: LanguageService + 'static, R: SessionRepository + 'static>(
-    explorer: Explorer<L, R>,
-    session_path: PathBuf,
-    themes: Vec<Theme>,
-    project: Option<PathBuf>,
-) -> Result<(), String> {
-    run_with_options(
-        explorer,
-        session_path,
-        themes,
-        project,
-        ProjectOptions::default(),
-    )
-}
+use crate::view::ExplorerView;
 
 /// Open the explorer with language and compilation database overrides.
-pub fn run_with_options<L: LanguageService + 'static, R: SessionRepository + 'static>(
+pub fn run<L: LanguageService + 'static, R: SessionRepository + 'static>(
     explorer: Explorer<L, R>,
     session_path: PathBuf,
     themes: Vec<Theme>,
@@ -52,7 +39,7 @@ pub fn run_with_options<L: LanguageService + 'static, R: SessionRepository + 'st
             move |window, cx| {
                 window.set_window_title("Refscape");
                 cx.new(|cx| {
-                    ExplorerView::new_with_options(
+                    ExplorerView::new(
                         explorer,
                         session_path,
                         themes,
@@ -75,22 +62,9 @@ pub fn run_with_options<L: LanguageService + 'static, R: SessionRepository + 'st
     }
 }
 
-/// Render the explorer through the native GPU backend for visual verification.
-#[cfg(feature = "visual-tests")]
-pub fn render_snapshot<L: LanguageService + 'static, R: SessionRepository + 'static>(
-    explorer: Explorer<L, R>,
-    session_path: PathBuf,
-    output: PathBuf,
-) -> Result<(), String> {
-    render_snapshot_with_selection(explorer, session_path, output, None)
-}
-
 /// Render a selected variable as well as its expanded type cards.
 #[cfg(feature = "visual-tests")]
-pub fn render_snapshot_with_selection<
-    L: LanguageService + 'static,
-    R: SessionRepository + 'static,
->(
+pub fn render_snapshot<L: LanguageService + 'static, R: SessionRepository + 'static>(
     mut explorer: Explorer<L, R>,
     session_path: PathBuf,
     output: PathBuf,
@@ -113,10 +87,17 @@ pub fn render_snapshot_with_selection<
             },
             |window, cx| {
                 cx.new(|cx| {
-                    let mut view =
-                        ExplorerView::new(explorer, session_path, vec![], None, window, cx);
-                    view.inspection = inspection;
-                    view.selected = selection.map(|(id, _)| id);
+                    let mut view = ExplorerView::new(
+                        explorer,
+                        session_path,
+                        vec![],
+                        None,
+                        ProjectOptions::default(),
+                        window,
+                        cx,
+                    );
+                    view.canvas.inspection = inspection;
+                    view.canvas.selected = selection.map(|(id, _)| id);
                     view
                 })
             },

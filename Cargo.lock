@@ -4551,6 +4551,14 @@ dependencies = [
 name = "refscape-application"
 version = "0.1.0"
 dependencies = [
+ "refscape-canvas",
+ "refscape-model",
+]
+
+[[package]]
+name = "refscape-canvas"
+version = "0.1.0"
+dependencies = [
  "refscape-model",
 ]
 
@@ -4559,6 +4567,36 @@ name = "refscape-language"
 version = "0.1.0"
 dependencies = [
  "refscape-application",
+ "refscape-language-cpp",
+ "refscape-language-rust",
+ "refscape-model",
+]
+
+[[package]]
+name = "refscape-language-cpp"
+version = "0.1.0"
+dependencies = [
+ "refscape-application",
+ "refscape-lsp",
+ "refscape-model",
+ "serde_json",
+]
+
+[[package]]
+name = "refscape-language-rust"
+version = "0.1.0"
+dependencies = [
+ "refscape-application",
+ "refscape-lsp",
+ "refscape-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "refscape-lsp"
+version = "0.1.0"
+dependencies = [
  "refscape-model",
  "serde",
  "serde_json",
@@ -4588,6 +4626,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "refscape-application",
+ "refscape-canvas",
  "refscape-model",
 ]
 

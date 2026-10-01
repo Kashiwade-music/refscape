@@ -7,10 +7,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use refscape_application::Explorer;
+use refscape_application::explorer::Explorer;
 use refscape_language::LanguageBackend;
 use refscape_model::{ConnectionKind, Point, Position, ProjectLanguage, ProjectOptions, Symbol};
-use refscape_storage::JsonSessionRepository;
+use refscape_storage::session::JsonSessionRepository;
 
 type TestExplorer = Explorer<LanguageBackend, JsonSessionRepository>;
 
@@ -181,9 +181,7 @@ fn real_c_and_cpp_navigation_and_external_database_session_restore() {
         compilation_database: Some(fixture.database.clone()),
     };
     let mut explorer = explorer();
-    explorer
-        .open_project_with_options(&fixture.root, &options)
-        .unwrap();
+    explorer.open_project(&fixture.root, &options).unwrap();
     assert_eq!(explorer.session().project_root, fixture.root);
     assert_eq!(explorer.session().project_options, options);
     assert!(!fixture.database.starts_with(&fixture.root));
@@ -372,7 +370,9 @@ fn simple_c_project_opens_without_a_compilation_database() {
     )
     .unwrap();
     let mut explorer = explorer();
-    explorer.open_project(&fixture.root).unwrap();
+    explorer
+        .open_project(&fixture.root, &ProjectOptions::default())
+        .unwrap();
     assert_eq!(
         explorer.session().project_options.language,
         ProjectLanguage::Cpp

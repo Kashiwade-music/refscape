@@ -10,29 +10,29 @@ pub(super) struct HoverTarget {
 
 impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<L, R> {
     pub(super) fn clear_hover(&mut self, cx: &mut Context<Self>) {
-        self.hover_task = None;
-        self.hover_dismiss_task = None;
-        self.hover_pending_target = None;
-        if self.hover_target.take().is_some() || self.hover_text.is_some() {
-            self.hover_text = None;
-            self.hover_scroll.set_offset(point(px(0.0), px(0.0)));
+        self.hover.task = None;
+        self.hover.dismiss_task = None;
+        self.hover.pending_target = None;
+        if self.hover.target.take().is_some() || self.hover.text.is_some() {
+            self.hover.text = None;
+            self.hover.scroll.set_offset(point(px(0.0), px(0.0)));
             cx.notify();
         }
     }
 
     pub(super) fn dismiss_hover(&mut self, cx: &mut Context<Self>) {
-        self.hover_pending_target = None;
-        if self.hover_text.is_none() {
+        self.hover.pending_target = None;
+        if self.hover.text.is_none() {
             self.clear_hover(cx);
-        } else if self.hover_dismiss_task.is_none() {
+        } else if self.hover.dismiss_task.is_none() {
             // Let the pointer cross the space between a word and its popup.
             // Entering either cancels this task, while leaving both closes it.
-            self.hover_dismiss_task = Some(cx.spawn(async move |view, cx| {
+            self.hover.dismiss_task = Some(cx.spawn(async move |view, cx| {
                 cx.background_executor()
                     .timer(Duration::from_millis(300))
                     .await;
                 let _ = view.update(cx, |view, cx| {
-                    let next_target = view.hover_pending_target.take();
+                    let next_target = view.hover.pending_target.take();
                     view.clear_hover(cx);
                     if let Some(target) = next_target {
                         view.request_hover(target, cx);
@@ -43,16 +43,17 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
     }
 
     fn keep_hover(&mut self) {
-        self.hover_dismiss_task = None;
-        self.hover_pending_target = None;
+        self.hover.dismiss_task = None;
+        self.hover.pending_target = None;
     }
 
     fn hover_at(&self, mouse: gpui::Point<Pixels>) -> Option<HoverTarget> {
         let zoom = self.session.viewport.zoom;
-        if zoom < 0.65 || !self.bounds.contains(&mouse) {
+        if zoom < 0.65 || !self.canvas.bounds.contains(&mouse) {
             return None;
         }
         let painted = self
+            .canvas
             .painted
             .iter()
             .rev()
@@ -88,20 +89,20 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
     }
 
     pub(super) fn update_hover(&mut self, mouse: gpui::Point<Pixels>, cx: &mut Context<Self>) {
-        if self.busy || self.drag.is_some() {
+        if self.requests.busy || self.canvas.drag.is_some() {
             self.clear_hover(cx);
             return;
         }
         let target = self.hover_at(mouse);
-        if target == self.hover_target {
+        if target == self.hover.target {
             self.keep_hover();
             return;
         }
-        if self.hover_text.is_some() {
+        if self.hover.text.is_some() {
             // Crossing another code word on the way to the panel should not
             // replace the explanation before the pointer can reach it.
             self.dismiss_hover(cx);
-            self.hover_pending_target = target;
+            self.hover.pending_target = target;
             return;
         }
         self.clear_hover(cx);
@@ -112,9 +113,9 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
     }
 
     fn request_hover(&mut self, target: HoverTarget, cx: &mut Context<Self>) {
-        self.hover_target = Some(target.clone());
+        self.hover.target = Some(target.clone());
         let explorer = self.explorer.clone();
-        self.hover_task = Some(cx.spawn(async move |view, cx| {
+        self.hover.task = Some(cx.spawn(async move |view, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(400))
                 .await;
@@ -130,10 +131,13 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                 })
                 .await;
             let _ = view.update(cx, |view, cx| {
-                if view.hover_target.as_ref() != Some(&target) || view.busy || view.closing {
+                if view.hover.target.as_ref() != Some(&target)
+                    || view.requests.busy
+                    || view.requests.closing
+                {
                     return;
                 }
-                view.hover_text = match result {
+                view.hover.text = match result {
                     Ok(text) => text.filter(|text| !text.trim().is_empty()),
                     Err(error) => Some(format!("Hover information unavailable: {error}")),
                 };
@@ -143,18 +147,18 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
     }
 
     pub(super) fn hover_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let target = self.hover_target.as_ref()?;
-        let text = self.hover_text.as_ref()?;
+        let target = self.hover.target.as_ref()?;
+        let text = self.hover.text.as_ref()?;
         let palette = &self.session.theme.palette;
-        let width = (f32::from(self.bounds.size.width) - 24.0).clamp(1.0, 460.0);
-        let height = (f32::from(self.bounds.size.height) - 24.0).clamp(1.0, 320.0);
-        let left = f32::from(target.anchor.x - self.bounds.left()).clamp(
+        let width = (f32::from(self.canvas.bounds.size.width) - 24.0).clamp(1.0, 460.0);
+        let height = (f32::from(self.canvas.bounds.size.height) - 24.0).clamp(1.0, 320.0);
+        let left = f32::from(target.anchor.x - self.canvas.bounds.left()).clamp(
             12.0,
-            (f32::from(self.bounds.size.width) - width - 12.0).max(12.0),
+            (f32::from(self.canvas.bounds.size.width) - width - 12.0).max(12.0),
         );
-        let top = (f32::from(target.anchor.y - self.bounds.top()) + 6.0).clamp(
+        let top = (f32::from(target.anchor.y - self.canvas.bounds.top()) + 6.0).clamp(
             12.0,
-            (f32::from(self.bounds.size.height) - height - 12.0).max(12.0),
+            (f32::from(self.canvas.bounds.size.height) - height - 12.0).max(12.0),
         );
         Some(
             div()
@@ -166,7 +170,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                 .w(px(width))
                 .max_h(px(height))
                 .overflow_y_scroll()
-                .track_scroll(&self.hover_scroll)
+                .track_scroll(&self.hover.scroll)
                 .p_3()
                 .rounded_md()
                 .border_1()

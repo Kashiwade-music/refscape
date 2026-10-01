@@ -1,6 +1,6 @@
 //! Real-server coverage, opt-in because rust-analyzer is an external toolchain component.
-use refscape_application::LanguageService;
-use refscape_language::RustAnalyzer;
+use refscape_application::ports::LanguageService;
+use refscape_language_rust::RustAnalyzer;
 use refscape_model::{Position, SourceRange, Symbol};
 use std::{
     env, fs,
@@ -8,7 +8,7 @@ use std::{
 };
 
 #[test]
-#[ignore = "requires rust-analyzer; run cargo test -p refscape-language --test rust_analyzer -- --ignored"]
+#[ignore = "requires rust-analyzer; run cargo test -p refscape-language-rust --test rust_analyzer -- --ignored"]
 fn real_server_resolves_inferred_variable_types_and_scope_aware_highlights() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -38,7 +38,9 @@ fn real_server_resolves_inferred_variable_types_and_scope_aware_highlights() {
         }
     };
     let mut language = RustAnalyzer::default().with_timeout(Duration::from_secs(30));
-    language.open_project(&root).unwrap();
+    language
+        .open_project(&root, &refscape_model::ProjectOptions::default())
+        .unwrap();
     let file = language
         .source(&Symbol::file(lib.clone(), SourceRange::default()))
         .unwrap();
@@ -98,7 +100,7 @@ fn real_server_resolves_inferred_variable_types_and_scope_aware_highlights() {
 }
 
 #[test]
-#[ignore = "requires rust-analyzer; run cargo test -p refscape-language --test rust_analyzer -- --ignored"]
+#[ignore = "requires rust-analyzer; run cargo test -p refscape-language-rust --test rust_analyzer -- --ignored"]
 fn real_server_follows_cross_file_definitions_references_and_highlights() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -118,7 +120,9 @@ fn real_server_follows_cross_file_definitions_references_and_highlights() {
     )
     .unwrap();
     let mut language = RustAnalyzer::default().with_timeout(Duration::from_secs(20));
-    language.open_project(&root).unwrap();
+    language
+        .open_project(&root, &refscape_model::ProjectOptions::default())
+        .unwrap();
     let crates = language.project_crates().unwrap();
     assert_eq!(crates.len(), 1);
     assert_eq!(crates[0].name, "refscape_lsp_fixture");
@@ -184,7 +188,11 @@ fn real_server_follows_cross_file_definitions_references_and_highlights() {
     let broken = root.join("broken-project");
     fs::create_dir_all(&broken).unwrap();
     fs::write(broken.join("Cargo.toml"), "[package]\nname =\n").unwrap();
-    assert!(language.open_project(&broken).is_err());
+    assert!(
+        language
+            .open_project(&broken, &refscape_model::ProjectOptions::default())
+            .is_err()
+    );
     assert_eq!(language.project_crates().unwrap(), crates);
     assert!(
         language
@@ -225,7 +233,7 @@ fn real_server_follows_cross_file_definitions_references_and_highlights() {
 }
 
 #[test]
-#[ignore = "requires rust-analyzer; run cargo test -p refscape-language --test rust_analyzer -- --ignored"]
+#[ignore = "requires rust-analyzer; run cargo test -p refscape-language-rust --test rust_analyzer -- --ignored"]
 fn real_workspace_packages_use_cargo_boundaries_and_custom_targets() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -256,7 +264,9 @@ fn real_workspace_packages_use_cargo_boundaries_and_custom_targets() {
     )
     .unwrap();
     let mut language = RustAnalyzer::default().with_timeout(Duration::from_secs(60));
-    language.open_project(&root).unwrap();
+    language
+        .open_project(&root, &refscape_model::ProjectOptions::default())
+        .unwrap();
     let crates = language.project_crates().unwrap();
     assert_eq!(
         crates

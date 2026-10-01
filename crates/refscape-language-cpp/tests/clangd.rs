@@ -1,11 +1,11 @@
 //! Real clangd coverage is opt-in because LLVM is an external dependency.
-use refscape_application::LanguageService;
-use refscape_language::{Clangd, LanguageBackend};
+use refscape_application::ports::LanguageService;
+use refscape_language_cpp::Clangd;
 use refscape_model::{Position, ProjectLanguage, ProjectOptions, SourceRange, Symbol};
 use serde_json::json;
 use std::{
     env, fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -88,7 +88,7 @@ fn eventually(mut check: impl FnMut() -> bool) {
 }
 
 #[test]
-#[ignore = "requires clangd; run cargo test -p refscape-language --test clangd -- --ignored"]
+#[ignore = "requires clangd; run cargo test -p refscape-language-cpp --test clangd -- --ignored"]
 fn cpp_headers_navigation_tokens_and_failed_project_switches() {
     let fixture = Fixture::new();
     let header = fixture.write(
@@ -111,8 +111,8 @@ fn cpp_headers_navigation_tokens_and_failed_project_switches() {
         language: ProjectLanguage::Cpp,
         compilation_database: Some(database.clone()),
     };
-    let mut language = LanguageBackend::default().with_timeout(Duration::from_secs(30));
-    language.open_project_with_options(&root, &options).unwrap();
+    let mut language = Clangd::default().with_timeout(Duration::from_secs(30));
+    language.open_project(&root, &options).unwrap();
     assert_eq!(language.project_options(), options);
     assert!(language.project_crates().unwrap().is_empty());
     assert_eq!(
@@ -201,7 +201,7 @@ fn cpp_headers_navigation_tokens_and_failed_project_switches() {
         compilation_database: Some(root.join("missing/compile_commands.json")),
         ..options.clone()
     };
-    assert!(language.open_project_with_options(&root, &bad).is_err());
+    assert!(language.open_project(&root, &bad).is_err());
     assert_eq!(language.project_options(), options);
     assert!(
         language
@@ -211,13 +211,20 @@ fn cpp_headers_navigation_tokens_and_failed_project_switches() {
             .any(|symbol| symbol.name == "entry")
     );
     let unknown = fixture.write("other/README.txt", "not a source project");
-    assert!(language.open_project(unknown.parent().unwrap()).is_err());
+    assert!(
+        language
+            .open_project(
+                unknown.parent().unwrap(),
+                &refscape_model::ProjectOptions::default()
+            )
+            .is_err()
+    );
     assert_eq!(language.project_options(), options);
     drop(language);
 }
 
 #[test]
-#[ignore = "requires clangd; run cargo test -p refscape-language --test clangd -- --ignored"]
+#[ignore = "requires clangd; run cargo test -p refscape-language-cpp --test clangd -- --ignored"]
 fn c_language_database_macros_and_no_database_fallback() {
     let fixture = Fixture::new();
     let header = fixture.write(
@@ -234,7 +241,7 @@ fn c_language_database_macros_and_no_database_fallback() {
     let root = fixture.0.join("source");
     let mut language = Clangd::default().with_timeout(Duration::from_secs(30));
     language
-        .open_project_with_options(
+        .open_project(
             &root,
             &ProjectOptions {
                 language: ProjectLanguage::Cpp,
@@ -263,7 +270,12 @@ fn c_language_database_macros_and_no_database_fallback() {
     assert!(hover.contains('7'), "{hover}");
     assert!(language.project_crates().unwrap().is_empty());
     let fallback = fixture.write("fallback/main.c", "int entry(void) { return 42; }\n");
-    language.open_project(fallback.parent().unwrap()).unwrap();
+    language
+        .open_project(
+            fallback.parent().unwrap(),
+            &refscape_model::ProjectOptions::default(),
+        )
+        .unwrap();
     assert_eq!(language.project_options().compilation_database, None);
     assert!(
         language
@@ -281,7 +293,10 @@ fn c_language_database_macros_and_no_database_fallback() {
         "class Widget { public: int count = 42; };\n",
     );
     language
-        .open_project(fallback_cpp.parent().unwrap())
+        .open_project(
+            fallback_cpp.parent().unwrap(),
+            &refscape_model::ProjectOptions::default(),
+        )
         .unwrap();
     assert!(
         language
@@ -304,9 +319,10 @@ fn c_language_database_macros_and_no_database_fallback() {
 fn startup_errors_identify_the_required_c_cpp_server() {
     let fixture = Fixture::new();
     fixture.write("main.cpp", "int main() {}");
-    let mut language =
-        LanguageBackend::new(Path::new("no-rust-analyzer"), fixture.0.join("no-clangd"));
-    let error = language.open_project(&fixture.0).unwrap_err();
+    let mut language = Clangd::new(fixture.0.join("no-clangd"));
+    let error = language
+        .open_project(&fixture.0, &refscape_model::ProjectOptions::default())
+        .unwrap_err();
     assert!(
         error.contains("cannot start clangd") && error.contains("REFSCAPE_CLANGD"),
         "{error}"

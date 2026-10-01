@@ -9,10 +9,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use refscape_application::{Explorer, SessionRepository};
+use refscape_application::{explorer::Explorer, ports::SessionRepository};
 use refscape_language::LanguageBackend;
 use refscape_model::{Point, ProjectOptions, Theme};
-use refscape_storage::{JsonSessionRepository, default_session_path, load_theme, save_theme};
+use refscape_storage::{
+    session::{JsonSessionRepository, default_session_path},
+    theme::{load_theme, save_theme},
+};
 
 use options::{HELP, Options};
 
@@ -94,7 +97,7 @@ fn run() -> Result<(), String> {
             .map(default_session_path)
             .unwrap_or_default()
     });
-    refscape_ui::run_with_options(
+    refscape_ui::runtime::run(
         explorer,
         session_path,
         themes,
@@ -110,7 +113,7 @@ fn check_project(
     project_options: &ProjectOptions,
 ) -> Result<(), String> {
     let project = std::fs::canonicalize(project).map_err(|e| e.to_string())?;
-    explorer.open_project_with_options(&project, project_options)?;
+    explorer.open_project(&project, project_options)?;
     let files = explorer.files()?;
     let mut selected = None;
     for path in &files {

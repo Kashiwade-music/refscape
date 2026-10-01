@@ -1,7 +1,11 @@
 [workspace]
 members = [
     "crates/refscape-model",
+    "crates/refscape-canvas",
     "crates/refscape-application",
+    "crates/refscape-lsp",
+    "crates/refscape-language-rust",
+    "crates/refscape-language-cpp",
     "crates/refscape-language",
     "crates/refscape-storage",
     "crates/refscape-ui",
@@ -19,7 +23,11 @@ publish = false
 
 [workspace.dependencies]
 refscape-model = { path = "crates/refscape-model" }
+refscape-canvas = { path = "crates/refscape-canvas" }
 refscape-application = { path = "crates/refscape-application" }
+refscape-lsp = { path = "crates/refscape-lsp" }
+refscape-language-rust = { path = "crates/refscape-language-rust" }
+refscape-language-cpp = { path = "crates/refscape-language-cpp" }
 refscape-language = { path = "crates/refscape-language" }
 refscape-storage = { path = "crates/refscape-storage" }
 refscape-ui = { path = "crates/refscape-ui" }
