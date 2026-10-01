@@ -15,3 +15,6 @@ toml = "0.9.12"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[lints.clippy]
+mod_module_files = "deny"

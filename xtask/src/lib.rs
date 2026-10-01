@@ -1,11 +1,14 @@
 mod architecture;
+mod source_rules;
 
 use std::{env, path::Path, process::Command};
 
 pub use architecture::{check_architecture, dependency_graph, write_dependency_graph};
+pub use source_rules::{MAX_FILE_LINES, check_source_rules};
 
-/// Validate architecture and regenerate its graph before checking product code.
+/// Validate source rules and architecture, then regenerate the graph and check both workspaces.
 pub fn gate(root: &Path) -> Result<(), String> {
+    println!("{}", check_source_rules(root)?);
     println!("{}", check_architecture(root)?);
     println!("{}", write_dependency_graph(root)?);
 
@@ -40,6 +43,20 @@ pub fn gate(root: &Path) -> Result<(), String> {
             "clippy",
             "--manifest-path",
             "xtask/Cargo.toml",
+            "--all-targets",
+            "--all-features",
+            "--locked",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
+    cargo(
+        root,
+        &[
+            "clippy",
+            "--manifest-path",
+            "examples/demo/Cargo.toml",
             "--all-targets",
             "--all-features",
             "--locked",

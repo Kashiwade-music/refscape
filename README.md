@@ -212,6 +212,8 @@ GPUIが使う描画バックエンドに対応したGPUドライバーが必要�
 
 製品は6 crateのCargo workspaceで構成し、開発用の `xtask` は独立したworkspaceとする。
 各crateの責務・依存方向・検査ルールは [アーキテクチャ](docs/architecture.md) を参照。
+1ソースファイルは空行・コメント・文字列を除いて `max_file_lines`（1000行）以下とし、子を持つRustモジュールは `<name>.rs` と `<name>/` の組で配置する。`mod.rs` は使わない。
+`cargo xtask gate` で検査し、既存の違反も失敗として報告する（分割・移動は後で一括対応）。
 現在の依存宣言は [依存グラフ](docs/dependency-graph.md) にMermaidで出力する。
 
 Rust toolchainは `rust-toolchain.toml` に固定している。リポジトリのルートで次を実行する。

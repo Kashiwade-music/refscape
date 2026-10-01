@@ -95,6 +95,35 @@ GPUIは2026-10-01に確認したZedの `main` の最新コミット
 同じ完全なコミットSHAを使う。製品のビルドにはZedのGit取得とGPUIのOS固有依存が必要。
 更新時も最新コミットを確認して完全なSHAに固定し、常時追従するbranch指定にはしない。
 
+## ファイルとモジュールの規約
+
+- 1ソースファイルは `max_file_lines`（1000行）以下とする。空行・コメント・文字列リテラルを除去した後にコードが残る行だけを数える。末尾の改行の有無やLF・CRLFで上限は変わらない。
+- 子を持つRustモジュールは `<name>.rs` と `<name>/` の組で配置する。`mod.rs` は使わない。
+
+`xtask/src/source_rules.rs` の `MAX_FILE_LINES` を行数上限の正本とする。
+`cargo xtask gate` の最初に、Git管理下のファイルとignoreされていない未追跡ファイルを検査する。
+行数検査は製品・xtask・example・テストのRust/C/C++ソース（`.rs`、`.c`、`.h`、`.cc`、`.cpp`、`.cxx`、`.hh`、`.hpp`、`.hxx`）に適用する。
+ドキュメント・設定・自動生成するlockfile・依存グラフ・バイナリ資産は対象外とする。
+Gitのignore対象の未追跡ファイル（`target/` など）と作業ツリーで削除したファイルは検査しない。
+
+行コメント・docコメント・ブロックコメント（Rustでは入れ子も含む）と、通常文字列・複数行文字列・raw文字列・byte/C文字列を除外する。
+文字列と同じ行にある代入・呼び出し・区切り記号などはコードとして残るため、その行は数える。
+文字リテラル・ライフタイムはコードとして数える。閉じていないコメント・文字列や読み込み失敗は検査失敗とする。
+
+Rustファイルを含む子ディレクトリには、同名の親 `.rs` ファイルが必要。
+Cargoのソース・ターゲット用ディレクトリ（`src/`、`src/bin/`、`tests/`、`examples/`、`benches/`）と、
+そのターゲット用ディレクトリ直下で `main.rs` / `lib.rs` を持つ個別ターゲットのルートは例外とする。
+Rustファイルを含まない資産ディレクトリには親 `.rs` を要求しない。
+既存の `mod.rs` 配置はこの対応検査で先に拒否せず、後続のClippyに診断を任せる。
+
+`mod.rs` 禁止はClippyの `clippy::mod_module_files` を `deny` にして検査する。
+製品はルートの `[workspace.lints.clippy]` を各crateが継承し、独立workspaceの `xtask` と
+`examples/demo` はそれぞれ `[lints.clippy]` に設定する。ゲートで3 workspaceのClippyを実行する。
+コンパイル対象のRustモジュールに対して適用され、既存lintの独自再実装は持たない。
+
+全違反をパス・行数または必要な親ファイルとともに表示し、非ゼロ終了する。
+既存の違反にも適用し、免除リストや自動修正は設けない。既存ファイルの分割・移動は後で一括して行う。
+
 ## 構造検査
 
 ```sh
@@ -169,11 +198,12 @@ cargo xtask gate
 
 以下を順番に実行し、最初の失敗で非ゼロ終了する。
 
-1. 全内部依存の循環・依存方向・workspace構成を検査。
-2. `docs/dependency-graph.md` を自動生成・更新。
-3. 製品とxtaskの `cargo fmt --check`。
-4. 製品とxtaskの `cargo clippy --all-targets --all-features --locked -- -D warnings`。
-5. 製品とxtaskの `cargo test --all-features --locked`（製品は `--workspace`、doc-testも含む）。
+1. `max_file_lines`（1000行以下）、`<name>.rs` と `<name>/` の対応を検査。
+2. 全内部依存の循環・依存方向・workspace構成を検査。
+3. `docs/dependency-graph.md` を自動生成・更新。
+4. 製品とxtaskの `cargo fmt --check`。
+5. 製品・xtask・Rust exampleの `cargo clippy --all-targets --all-features --locked -- -D warnings`（`mod_module_files` による `mod.rs` 禁止を含む）。
+6. 製品とxtaskの `cargo test --all-features --locked`（製品は `--workspace`、doc-testも含む）。
 
 ルートの `cargo fmt --all` や `cargo test --workspace` は独立workspaceのxtaskを含まない。
 ゲートでは両workspaceを明示的に検査する。手動でフォーマットする場合も両方を実行する。
