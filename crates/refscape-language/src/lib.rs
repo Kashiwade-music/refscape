@@ -191,6 +191,15 @@ impl RustAnalyzer {
 }
 
 impl LanguageService for RustAnalyzer {
+    fn hover(&mut self, path: &Path, position: Position) -> Result<Option<String>, String> {
+        let (_, uri, text) = self.open_document(path)?;
+        byte_offset(&text, position)?;
+        let value = self.client()?.request(
+            "textDocument/hover",
+            json!({"textDocument":{"uri":uri},"position":position}),
+        )?;
+        hover_contents(&value)
+    }
     fn project_crates(&mut self) -> Result<Vec<ProjectCrate>, String> {
         Ok(self
             .project
@@ -229,6 +238,7 @@ impl LanguageService for RustAnalyzer {
                 "textDocument":{
                     "documentSymbol":{"hierarchicalDocumentSymbolSupport":true},
                     "definition":{"linkSupport":true},
+                    "hover":{"contentFormat":["plaintext"]},
                     "semanticTokens":{"requests":{"full":true},"tokenTypes":["namespace","type","class","enum","interface","struct","typeParameter","parameter","variable","property","enumMember","event","function","method","macro","keyword","modifier","comment","string","number","regexp","operator","decorator"],"tokenModifiers":["declaration","definition","readonly","static","deprecated","abstract","async","modification","documentation","defaultLibrary"],"formats":["relative"],"overlappingTokenSupport":false,"multilineTokenSupport":false}
                 },
                 "experimental":{"serverStatusNotification":true}
@@ -331,6 +341,31 @@ impl LanguageService for RustAnalyzer {
     fn references(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>, String> {
         self.navigate(path, position, true)
     }
+}
+
+fn hover_contents(value: &Value) -> Result<Option<String>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    fn content(value: &Value) -> Result<String, String> {
+        if let Some(text) = value.as_str() {
+            return Ok(text.into());
+        }
+        if let Some(values) = value.as_array() {
+            return values
+                .iter()
+                .map(content)
+                .collect::<Result<Vec<_>, _>>()
+                .map(|parts| parts.join("\n\n"));
+        }
+        value
+            .get("value")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| "Invalid hover contents from rust-analyzer".into())
+    }
+    let text = content(&value["contents"])?;
+    Ok((!text.trim().is_empty()).then_some(text))
 }
 
 fn collect_files(root: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -647,6 +682,29 @@ fn uri_path(uri: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hover_decodes_markup_and_legacy_contents_and_empty_results() {
+        for contents in [
+            json!({"kind":"plaintext", "value":"fn answer() -> u32\n\nReturns the answer."}),
+            json!([{"language":"rust", "value":"fn answer() -> u32"}, "Returns the answer."]),
+            json!("fn answer() -> u32\n\nReturns the answer."),
+        ] {
+            assert_eq!(
+                hover_contents(&json!({"contents":contents}))
+                    .unwrap()
+                    .as_deref(),
+                Some("fn answer() -> u32\n\nReturns the answer.")
+            );
+        }
+        assert_eq!(hover_contents(&Value::Null).unwrap(), None);
+        assert_eq!(hover_contents(&json!({"contents":[]})).unwrap(), None);
+        assert_eq!(
+            hover_contents(&json!({"contents":{"kind":"plaintext","value":" "}})).unwrap(),
+            None
+        );
+        assert!(hover_contents(&json!({"contents":42})).is_err());
+    }
 
     #[test]
     fn utf16_positions_and_crlf_preserve_exact_source() {

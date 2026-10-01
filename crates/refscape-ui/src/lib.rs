@@ -1,4 +1,5 @@
 //! Native spatial explorer; language and persistence operations run off the UI thread.
+mod hover;
 mod input;
 mod runtime;
 #[cfg(feature = "visual-tests")]
@@ -15,7 +16,8 @@ use gpui::{
 };
 use refscape_application::{Explorer, LanguageService, SessionRepository, arrange_cards};
 use refscape_model::{
-    CODE_CARD_HEADER, CODE_LINE_HEIGHT, CodeCard, Palette, Point, Position, Session, Symbol, Theme,
+    CODE_CARD_HEADER, CODE_LINE_HEIGHT, CodeCard, ConnectionKind, Palette, Point, Position,
+    Session, Symbol, Theme,
 };
 use std::{
     ops::Range,
@@ -76,6 +78,9 @@ struct ExplorerView<L: LanguageService + 'static, R: SessionRepository + 'static
     selected: Option<String>,
     drag: Option<Drag>,
     painted: Vec<PaintedCard>,
+    hover_target: Option<hover::HoverTarget>,
+    hover_text: Option<String>,
+    hover_task: Option<gpui::Task<()>>,
     bounds: Bounds<Pixels>,
     closing: bool,
     autosave: bool,
@@ -121,6 +126,9 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             selected: None,
             drag: None,
             painted: vec![],
+            hover_target: None,
+            hover_text: None,
+            hover_task: None,
             bounds: Bounds::default(),
             closing: false,
             autosave: true,
@@ -161,16 +169,18 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             return;
         }
         self.busy = true;
+        self.clear_hover(cx);
         self.error = false;
         self.status = label.into();
         let explorer = self.explorer.clone();
         let viewport = self.session.viewport;
-        let positions = self
+        let positions: Vec<_> = self
             .session
             .cards
             .iter()
             .map(|c| (c.id.clone(), c.position))
             .collect();
+        let positions_before_job = positions.clone();
         let task = cx.background_executor().spawn(async move {
             let mut explorer = explorer
                 .lock()
@@ -190,6 +200,9 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                             for card in &mut session.cards {
                                 if let Some(old) =
                                     view.session.cards.iter().find(|old| old.id == card.id)
+                                    && positions_before_job.iter().any(|(id, position)| {
+                                        id == &card.id && *position != old.position
+                                    })
                                 {
                                     card.position = old.position;
                                 }
@@ -491,12 +504,12 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             cx,
         );
     }
-    fn add_symbol(&mut self, symbol: Symbol, cx: &mut Context<Self>) {
+    fn toggle_symbol(&mut self, symbol: Symbol, cx: &mut Context<Self>) {
         let position = self.insertion_point();
         self.run_job(
-            "Opening symbol…",
+            "Toggling symbol…",
             Box::new(move |explorer| {
-                explorer.add_symbol(symbol, position)?;
+                explorer.toggle_symbol(symbol, position)?;
                 Ok(Output::default())
             }),
             cx,
@@ -531,6 +544,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         );
     }
     fn zoom(&mut self, factor: f32, anchor: Point, cx: &mut Context<Self>) {
+        self.clear_hover(cx);
         let viewport = &mut self.session.viewport;
         let old = viewport.zoom;
         let zoom = (old * factor).clamp(0.15, 3.0);
@@ -542,6 +556,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         cx.notify();
     }
     fn fit(&mut self, cx: &mut Context<Self>) {
+        self.clear_hover(cx);
         if self.session.cards.is_empty() {
             self.session.viewport = Default::default();
             cx.notify();
@@ -584,6 +599,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         if self.closing {
             return;
         }
+        self.clear_hover(cx);
         self.search_focus = false;
         for card in self.painted.iter().rev() {
             if !card.bounds.contains(&event.position) {
@@ -619,6 +635,31 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                             0
                         },
                 );
+                let kind = if references {
+                    ConnectionKind::Reference
+                } else {
+                    ConnectionKind::Definition
+                };
+                // Reuse the link's position when another glyph of the same word
+                // is clicked, including saved links created before toggling existed.
+                let position = self
+                    .session
+                    .cards
+                    .iter()
+                    .find(|card| card.id == id)
+                    .and_then(|card| {
+                        let word = connected_word(card, position)?;
+                        self.session
+                            .connections
+                            .iter()
+                            .find(|edge| {
+                                edge.from == id
+                                    && edge.kind == kind
+                                    && connected_word(card, edge.source).as_ref() == Some(&word)
+                            })
+                            .map(|edge| edge.source)
+                    })
+                    .unwrap_or(position);
                 self.run_job(
                     if references {
                         "Finding references…"
@@ -627,12 +668,12 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                     },
                     Box::new(move |explorer| {
                         let found = if references {
-                            explorer.expand_references(&id, position)?
+                            explorer.toggle_references(&id, position)?
                         } else {
-                            explorer.expand_definition(&id, position)?
+                            explorer.toggle_definition(&id, position)?
                         };
                         Ok(Output {
-                            message: if found.is_empty() {
+                            message: if found.as_ref().is_some_and(Vec::is_empty) {
                                 Some(
                                     "rust-analyzer returned no locations for this position.".into(),
                                 )
@@ -674,12 +715,26 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
                     );
                 }
             }
-            None => return,
+            None => {
+                self.update_hover(event.position, cx);
+                return;
+            }
         }
         cx.notify();
     }
 
     fn arrange_canvas(&mut self) {
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|id| !self.session.cards.iter().any(|card| &card.id == id))
+        {
+            self.selected = None;
+        }
+        if matches!(&self.drag, Some(Drag::Card(id, ..)) if !self.session.cards.iter().any(|card| &card.id == id))
+        {
+            self.drag = None;
+        }
         if let Err(error) = arrange_cards(&mut self.session.cards) {
             self.status = error;
             self.error = true;
@@ -696,6 +751,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         if self.closing {
             return;
         }
+        self.clear_hover(cx);
         let (dx, dy) = match event.delta {
             ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
             ScrollDelta::Lines(p) => (p.x * 24.0, p.y * 24.0),
@@ -749,6 +805,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         }
         match key {
             "escape" => {
+                self.clear_hover(cx);
                 self.search_focus = false;
                 self.drag = None;
                 cx.notify();
@@ -817,6 +874,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             return false;
         }
         self.closing = true;
+        self.clear_hover(cx);
         self.status = "Saving session before closing…".into();
         self.error = false;
         let explorer = self.explorer.clone();
@@ -961,7 +1019,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                     let source = symbol.clone();
                     div().id(("symbol", index)).p_2().rounded_md().cursor_pointer().hover(|style| style.bg(color(&palette.surface_alt)))
                         .child(div().text_size(px(12.0)).child(symbol.name)).child(div().text_size(px(10.0)).text_color(color(&palette.muted)).child(format!("{} · {}:{}", symbol.kind, symbol.path.strip_prefix(&root).unwrap_or(&symbol.path).display(), symbol.selection_range.start.line + 1)))
-                        .on_click(cx.listener(move |v, _, _, cx| v.add_symbol(source.clone(), cx)))
+                        .on_click(cx.listener(move |v, _, _, cx| v.toggle_symbol(source.clone(), cx)))
                 }))
                 .child(div().py_2().text_size(px(11.0)).text_color(color(&palette.muted)).child(format!("FILES · {}", files.len())))
                 .children(files.into_iter().take(1000).enumerate().map(|(index, path)| {
@@ -986,11 +1044,17 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|v, e: &MouseDownEvent, _, cx| {
+                    v.clear_hover(cx);
                     v.drag = Some(Drag::Pan(e.position));
                     cx.notify();
                 }),
             )
             .on_mouse_move(cx.listener(|v, e, _, cx| v.mouse_move(e, cx)))
+            .on_hover(cx.listener(|v, hovered, _, cx| {
+                if !hovered {
+                    v.clear_hover(cx);
+                }
+            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|v, _, _, cx| {
@@ -1023,7 +1087,8 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                     },
                 )
                 .size_full(),
-            );
+            )
+            .children(self.hover_panel(cx));
         div()
             .size_full()
             .flex()

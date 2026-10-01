@@ -6,6 +6,7 @@ use std::path::Path;
 struct Language {
     source: SourceDocument,
     requests: Arc<Mutex<Vec<Position>>>,
+    targets: Vec<Symbol>,
 }
 impl LanguageService for Language {
     fn open_project(&mut self, _: &Path) -> Result<(), String> {
@@ -24,11 +25,16 @@ impl LanguageService for Language {
     }
     fn definitions(&mut self, _: &Path, position: Position) -> Result<Vec<Symbol>, String> {
         self.requests.lock().unwrap().push(position);
-        Ok(vec![])
+        Ok(self.targets.clone())
     }
     fn references(&mut self, _: &Path, position: Position) -> Result<Vec<Symbol>, String> {
         self.requests.lock().unwrap().push(position);
-        Ok(vec![])
+        Ok(self.targets.clone())
+    }
+    fn hover(&mut self, _: &Path, position: Position) -> Result<Option<String>, String> {
+        self.requests.lock().unwrap().push(position);
+        Ok((position == Position::new(12, 9))
+            .then(|| "fn call() -> u32\n\nCalls the helper.".into()))
     }
     fn search(&mut self, _: &str) -> Result<Vec<Symbol>, String> {
         Err("simulated analyzer failure".into())
@@ -44,6 +50,11 @@ impl SessionRepository for Repository {
     }
 }
 fn fixture() -> (Explorer<Language, Repository>, Arc<Mutex<Vec<Position>>>) {
+    fixture_with_targets(vec![])
+}
+fn fixture_with_targets(
+    targets: Vec<Symbol>,
+) -> (Explorer<Language, Repository>, Arc<Mutex<Vec<Position>>>) {
     let range = SourceRange {
         start: Position::new(12, 5),
         end: Position::new(12, 13),
@@ -59,6 +70,7 @@ fn fixture() -> (Explorer<Language, Repository>, Arc<Mutex<Vec<Position>>>) {
         Language {
             source,
             requests: requests.clone(),
+            targets,
         },
         Repository,
     );
@@ -66,6 +78,274 @@ fn fixture() -> (Explorer<Language, Repository>, Arc<Mutex<Vec<Position>>>) {
         .add_symbol(symbol, Point::new(100.0, 50.0))
         .unwrap();
     (explorer, requests)
+}
+
+#[gpui::test]
+fn source_hover_is_debounced_and_uses_absolute_utf16_at_each_zoom(cx: &mut TestAppContext) {
+    let (explorer, requests) = fixture();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        ExplorerView::new(explorer, "session.json".into(), vec![], None, window, cx)
+    });
+    let handle = cx.window_handle();
+    for (zoom, offset) in [
+        (1.0, Point::default()),
+        (0.75, Point::new(30.0, 45.0)),
+        (1.5, Point::new(-40.0, 10.0)),
+    ] {
+        view.update(cx, |view, cx| {
+            view.clear_hover(cx);
+            view.session.viewport.zoom = zoom;
+            view.session.viewport.offset = offset;
+            cx.notify();
+        });
+        requests.lock().unwrap().clear();
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        let (word, other_glyph, header, empty) = view.read_with(cx, |view, _| {
+            let card = &view.painted[0];
+            (
+                point(
+                    card.origin.x + card.lines[0].x_for_index("日本😀".len()) + px(1.0),
+                    card.origin.y + px(5.0 * zoom),
+                ),
+                point(
+                    card.origin.x + card.lines[0].x_for_index("日本😀ca".len()) + px(1.0),
+                    card.origin.y + px(5.0 * zoom),
+                ),
+                point(card.bounds.left() + px(20.0), card.bounds.top() + px(10.0)),
+                point(
+                    view.bounds.right() - px(10.0),
+                    view.bounds.bottom() - px(10.0),
+                ),
+            )
+        });
+        cx.simulate_mouse_move(word, None, Modifiers::default());
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        assert!(requests.lock().unwrap().is_empty());
+        cx.simulate_mouse_move(header, None, Modifiers::default());
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "leaving before the delay cancels the request"
+        );
+        cx.simulate_mouse_move(word, None, Modifiers::default());
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(400));
+        cx.run_until_parked();
+        assert_eq!(*requests.lock().unwrap(), vec![Position::new(12, 9)]);
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.hover_text.as_deref(),
+                Some("fn call() -> u32\n\nCalls the helper.")
+            );
+            assert!(!view.busy);
+        });
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        cx.simulate_mouse_move(other_glyph, None, Modifiers::default());
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "moving inside the same word reuses its hover"
+        );
+        let panel = cx.debug_bounds("code-hover").expect("rendered hover panel");
+        view.read_with(cx, |view, _| {
+            assert!(panel.left() >= view.bounds.left());
+            assert!(panel.right() <= view.bounds.right());
+            assert!(panel.top() >= view.bounds.top());
+            assert!(panel.bottom() <= view.bounds.bottom());
+        });
+        let inside_panel = point(panel.left() + px(20.0), panel.top() + px(20.0));
+        cx.simulate_mouse_move(inside_panel, None, Modifiers::default());
+        view.read_with(cx, |view, _| {
+            assert!(
+                view.hover_text.is_some(),
+                "the popup remains readable while hovered"
+            )
+        });
+        cx.simulate_click(inside_panel, Modifiers::default());
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "clicks inside the popup must not open definitions"
+        );
+        cx.simulate_mouse_move(empty, None, Modifiers::default());
+        view.read_with(cx, |view, _| assert!(view.hover_text.is_none()));
+    }
+}
+
+#[gpui::test]
+fn hover_cancels_when_zooming_and_never_requests_hidden_source(cx: &mut TestAppContext) {
+    let (explorer, requests) = fixture();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        ExplorerView::new(explorer, "session.json".into(), vec![], None, window, cx)
+    });
+    let handle = cx.window_handle();
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let word = view.read_with(cx, |view, _| {
+        let card = &view.painted[0];
+        point(
+            card.origin.x + card.lines[0].x_for_index("日本😀".len()) + px(1.0),
+            card.origin.y + px(5.0),
+        )
+    });
+    cx.simulate_mouse_move(word, None, Modifiers::default());
+    view.update(cx, |view, cx| view.zoom(0.5, Point::default(), cx));
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    cx.simulate_mouse_move(word, None, Modifiers::default());
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+    assert!(requests.lock().unwrap().is_empty());
+    view.read_with(cx, |view, _| assert!(view.hover_target.is_none()));
+}
+
+#[gpui::test]
+fn clicking_a_linked_word_toggles_cards_even_at_different_glyphs(cx: &mut TestAppContext) {
+    let mut target = Symbol::file(
+        "target.rs".into(),
+        SourceRange {
+            start: Position::new(12, 5),
+            end: Position::new(12, 13),
+        },
+    );
+    target.id = "target".into();
+    let (explorer, requests) = fixture_with_targets(vec![target]);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        ExplorerView::new(explorer, "session.json".into(), vec![], None, window, cx)
+    });
+    let handle = cx.window_handle();
+    for (glyph, count) in [("日本😀", 2), ("日本😀ca", 1), ("日本😀c", 2)] {
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        let click = view.read_with(cx, |view, _| {
+            let source = &view.painted[0];
+            point(
+                source.origin.x + source.lines[0].x_for_index(glyph.len()) + px(1.0),
+                source.origin.y + px(5.0),
+            )
+        });
+        cx.simulate_mouse_down(click, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(!view.error, "{}", view.status);
+            assert_eq!(view.session.cards.len(), count);
+            assert_eq!(view.session.connections.len(), count - 1);
+        });
+    }
+    // Hiding an existing link is local and should not ask the analyzer again.
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    let picker_symbol = view.read_with(cx, |view, _| view.session.cards[1].source.symbol.clone());
+    view.update(cx, |view, cx| {
+        view.selected = Some(view.session.cards[1].id.clone());
+        view.toggle_symbol(picker_symbol.clone(), cx);
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.session.cards.len(), 1);
+        assert!(view.session.connections.is_empty());
+        assert!(view.selected.is_none());
+    });
+    view.update(cx, |view, cx| view.toggle_symbol(picker_symbol, cx));
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| assert_eq!(view.session.cards.len(), 2));
+}
+
+#[gpui::test]
+fn hiding_a_card_applies_the_new_layout_to_the_canvas_and_connection_anchors(
+    cx: &mut TestAppContext,
+) {
+    let range = SourceRange {
+        start: Position::new(12, 5),
+        end: Position::new(12, 13),
+    };
+    let first = Symbol::file("first.rs".into(), range);
+    let second = Symbol::file("second.rs".into(), range);
+    let (mut explorer, _) = fixture_with_targets(vec![first.clone(), second.clone()]);
+    let far = explorer
+        .add_symbol(
+            Symbol::file("far.rs".into(), range),
+            Point::new(1960.0, 50.0),
+        )
+        .unwrap();
+    explorer.zoom(1.25, Point::default()).unwrap();
+    explorer.pan(Point::new(-50.0, 20.0)).unwrap();
+    let viewport = explorer.session().viewport;
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        ExplorerView::new(explorer, "session.json".into(), vec![], None, window, cx)
+    });
+    let handle = cx.window_handle();
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let click = view.read_with(cx, |view, _| {
+        let source = &view.painted[0];
+        point(
+            source.origin.x + source.lines[0].x_for_index("日本😀".len()) + px(1.0),
+            source.origin.y + px(5.0),
+        )
+    });
+    cx.simulate_mouse_down(click, MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    view.update(cx, |view, cx| view.toggle_symbol(first, cx));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let (session, bounds) = view.read_with(cx, |view, _| {
+        assert!(!view.error, "{}", view.status);
+        assert_eq!(view.session.cards.len(), 3);
+        let target = view
+            .session
+            .cards
+            .iter()
+            .find(|card| card.source.symbol.path == second.path)
+            .unwrap();
+        assert_eq!(target.position, Point::new(720.0, 50.0 + HEADER + 8.0));
+        assert_eq!(
+            view.session
+                .cards
+                .iter()
+                .find(|card| card.id == far)
+                .unwrap()
+                .position,
+            Point::new(1340.0, 50.0)
+        );
+        assert_eq!(view.session.viewport, viewport);
+        assert_eq!(
+            view.session.cards,
+            view.explorer.lock().unwrap().session().cards
+        );
+        (view.session.clone(), view.bounds)
+    });
+    cx.update_window(handle, |_, window, _| {
+        let links = code_connections(&session, bounds, window);
+        assert_eq!(links.len(), 1);
+        let target = session
+            .cards
+            .iter()
+            .find(|card| card.source.symbol.path == second.path)
+            .unwrap();
+        let target_bounds = card_bounds(target, &session, bounds);
+        assert_eq!(
+            links[0].end,
+            point(
+                target_bounds.left(),
+                target_bounds.top() + px(HEADER * viewport.zoom * 0.5)
+            )
+        );
+    })
+    .unwrap();
 }
 
 #[gpui::test]

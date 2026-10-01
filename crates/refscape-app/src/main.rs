@@ -142,7 +142,9 @@ fn check_project(
     let _ = std::fs::remove_file(path);
     result?;
     println!(
-        "Refscape check passed: {} Rust files, {} cards, {} connections; {definitions} definition results, {references} reference results, {token_count} semantic tokens; canvas and session roundtrip verified",
+        "Refscape check passed: {} Rust files, {} cards, {} connections; \
+         {definitions} definition results, {references} reference results, \
+         {token_count} semantic tokens; canvas and session roundtrip verified",
         files.len(),
         snapshot.cards.len(),
         snapshot.connections.len()

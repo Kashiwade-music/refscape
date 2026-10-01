@@ -24,7 +24,7 @@ fn real_server_follows_cross_file_definitions_references_and_highlights() {
     .unwrap();
     fs::write(
         root.join("src/helper.rs"),
-        "pub fn answer() -> u32 {\n    42\n}\n",
+        "/// Returns the answer.\npub fn answer() -> u32 {\n    42\n}\n",
     )
     .unwrap();
     let mut language = RustAnalyzer::default().with_timeout(Duration::from_secs(20));
@@ -59,11 +59,21 @@ fn real_server_follows_cross_file_definitions_references_and_highlights() {
     assert_eq!(definitions[0].path, helper.canonicalize().unwrap());
     let answer_source = language.source(&definitions[0]).unwrap();
     assert!(answer_source.code.contains("42"));
+    let hover = language
+        .hover(&lib, Position::new(2, 13))
+        .unwrap()
+        .expect("hover from rust-analyzer");
+    assert!(hover.contains("fn answer() -> u32"), "{hover}");
+    assert!(hover.contains("Returns the answer."), "{hover}");
+    assert!(
+        !hover.contains("```"),
+        "hover must use negotiated plain text: {hover}"
+    );
     let references = language
         .references(
             &helper,
             Position {
-                line: 0,
+                line: 1,
                 character: 8,
             },
         )

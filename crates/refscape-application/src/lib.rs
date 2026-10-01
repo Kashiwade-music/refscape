@@ -1,13 +1,14 @@
 //! Application operations and ports for language services and persistence.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
 use refscape_model::{
-    CodeCard, Connection, ConnectionKind, MAX_ZOOM, MIN_ZOOM, Point, Position, ProjectCrate,
-    Region, Session, SourceDocument, SourceRange, Symbol, Theme, Viewport,
+    CODE_CARD_HEADER, CODE_LINE_HEIGHT, CodeCard, Connection, ConnectionKind, MAX_ZOOM, MIN_ZOOM,
+    Point, Position, ProjectCrate, Region, Session, SourceDocument, SourceRange, Symbol, Theme,
+    Viewport,
 };
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -20,6 +21,10 @@ pub trait LanguageService: Send {
     fn source(&mut self, symbol: &Symbol) -> Result<SourceDocument>;
     fn definitions(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>>;
     fn references(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>>;
+
+    fn hover(&mut self, _path: &Path, _position: Position) -> Result<Option<String>> {
+        Ok(None)
+    }
 
     fn project_crates(&mut self) -> Result<Vec<ProjectCrate>> {
         Ok(Vec::new())
@@ -99,6 +104,19 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
         Ok(found)
     }
 
+    pub fn hover(&mut self, card_id: &str, position: Position) -> Result<Option<String>> {
+        let card = self
+            .session
+            .cards
+            .iter()
+            .find(|card| card.id == card_id)
+            .ok_or_else(|| format!("Unknown card {card_id}"))?;
+        if !card.source.symbol.range.contains(position) {
+            return Err("Requested source position is outside the card".into());
+        }
+        self.language.hover(&card.source.symbol.path, position)
+    }
+
     pub fn add_symbol(&mut self, symbol: Symbol, position: Point) -> Result<String> {
         if !position.is_finite() {
             return Err("Card position must be finite".into());
@@ -124,6 +142,59 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
             Symbol::file(path.to_path_buf(), SourceRange::default()),
             position,
         )
+    }
+
+    /// Toggle a picker symbol without changing the idempotent add/expand APIs.
+    pub fn toggle_symbol(&mut self, symbol: Symbol, position: Point) -> Result<Option<String>> {
+        if let Some(id) = self.card_for_symbol(&symbol).map(|card| card.id.clone()) {
+            self.remove_card(&id)?;
+            Ok(None)
+        } else {
+            self.add_symbol(symbol, position).map(Some)
+        }
+    }
+
+    pub fn toggle_definition(
+        &mut self,
+        card_id: &str,
+        position: Position,
+    ) -> Result<Option<Vec<String>>> {
+        self.toggle_expansion(card_id, position, ConnectionKind::Definition)
+    }
+
+    pub fn toggle_references(
+        &mut self,
+        card_id: &str,
+        position: Position,
+    ) -> Result<Option<Vec<String>>> {
+        self.toggle_expansion(card_id, position, ConnectionKind::Reference)
+    }
+
+    fn toggle_expansion(
+        &mut self,
+        card_id: &str,
+        position: Position,
+        kind: ConnectionKind,
+    ) -> Result<Option<Vec<String>>> {
+        let mut targets: Vec<_> = self
+            .session
+            .connections
+            .iter()
+            .filter(|edge| edge.from == card_id && edge.source == position && edge.kind == kind)
+            .map(|edge| edge.to.clone())
+            .collect();
+        if targets.is_empty() {
+            return self.expand(card_id, position, kind).map(Some);
+        }
+        targets.sort();
+        targets.dedup();
+        // Hide a group in one layout pass, while keeping the clicked source card.
+        targets.retain(|target| target != card_id);
+        self.remove_cards(&targets, &[card_id.into()])?;
+        self.session
+            .connections
+            .retain(|edge| !(edge.from == card_id && edge.source == position && edge.kind == kind));
+        Ok(None)
     }
 
     pub fn expand_definition(&mut self, card_id: &str, position: Position) -> Result<Vec<String>> {
@@ -178,8 +249,10 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
         }
         let mut placements = Vec::new();
         let mut occupied: Vec<_> = self.session.cards.iter().map(CardRect::from).collect();
-        let mut next_position =
-            Point::new(origin.position.x + origin.width + 100.0, origin.position.y);
+        let mut next_position = Point::new(
+            origin.position.x + origin.width + CARD_COLUMN_GAP,
+            source_anchor_y(&origin, position),
+        );
         for source in sources {
             let placement = match self.card_for_symbol(&source.symbol) {
                 Some(existing) => CardRect::from(existing),
@@ -244,13 +317,38 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
     }
 
     pub fn remove_card(&mut self, id: &str) -> Result<()> {
-        if !self.session.cards.iter().any(|c| c.id == id) {
-            return Err(format!("Unknown card {id}"));
+        self.remove_cards(&[id.into()], &[])
+    }
+
+    fn remove_cards(&mut self, ids: &[String], preserved: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
         }
-        self.session.cards.retain(|c| c.id != id);
+        for id in ids {
+            if !self.session.cards.iter().any(|card| &card.id == id) {
+                return Err(format!("Unknown card {id}"));
+            }
+        }
+        let removed = descendant_cards(&self.session.connections, ids, preserved);
+        let anchor = Point::new(
+            self.session
+                .cards
+                .iter()
+                .map(|card| card.position.x)
+                .fold(f32::INFINITY, f32::min),
+            self.session
+                .cards
+                .iter()
+                .map(|card| card.position.y)
+                .fold(f32::INFINITY, f32::min),
+        );
+        let mut cards = self.session.cards.clone();
+        cards.retain(|card| !removed.contains(&card.id));
+        compact_cards(&mut cards, anchor, &self.session.connections)?;
+        self.session.cards = cards;
         self.session
             .connections
-            .retain(|c| c.from != id && c.to != id);
+            .retain(|edge| !removed.contains(&edge.from) && !removed.contains(&edge.to));
         self.rebuild_regions();
         Ok(())
     }
@@ -432,6 +530,58 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
 }
 
 const CARD_GAP: f32 = 32.0;
+const CARD_COLUMN_GAP: f32 = 100.0;
+
+fn source_anchor_y(card: &CodeCard, position: Position) -> f32 {
+    card.position.y
+        + CODE_CARD_HEADER
+        + 8.0
+        + position
+            .line
+            .saturating_sub(card.source.symbol.range.start.line) as f32
+            * CODE_LINE_HEIGHT
+}
+
+/// Close the branch, preserving the clicked source and descendants reached by another branch.
+/// Work from the original graph so cycles cannot strand an orphaned group.
+fn descendant_cards(
+    connections: &[Connection],
+    ids: &[String],
+    preserved: &[String],
+) -> BTreeSet<String> {
+    let explicit: BTreeSet<_> = ids.iter().cloned().collect();
+    let mut candidates = explicit.clone();
+    let mut pending = ids.to_vec();
+    while let Some(id) = pending.pop() {
+        for edge in connections.iter().filter(|edge| edge.from == id) {
+            if !preserved.contains(&edge.to) && candidates.insert(edge.to.clone()) {
+                pending.push(edge.to.clone());
+            }
+        }
+    }
+    let mut retained = BTreeSet::new();
+    let mut pending: Vec<_> = connections
+        .iter()
+        .filter(|edge| {
+            !candidates.contains(&edge.from)
+                && candidates.contains(&edge.to)
+                && !explicit.contains(&edge.to)
+        })
+        .map(|edge| edge.to.clone())
+        .collect();
+    while let Some(id) = pending.pop() {
+        if !retained.insert(id.clone()) {
+            continue;
+        }
+        for edge in connections.iter().filter(|edge| edge.from == id) {
+            if candidates.contains(&edge.to) && !explicit.contains(&edge.to) {
+                pending.push(edge.to.clone());
+            }
+        }
+    }
+    candidates.retain(|id| !retained.contains(id));
+    candidates
+}
 
 #[derive(Clone, Copy)]
 struct CardRect {
@@ -513,6 +663,85 @@ pub fn arrange_cards(cards: &mut [CodeCard]) -> Result<()> {
     for (card, rect) in cards.iter_mut().zip(occupied) {
         card.position = rect.position;
         card.height = rect.height;
+    }
+    Ok(())
+}
+
+/// Pack the remaining columns from the previous canvas origin after cards close.
+/// Keep their horizontal column order and vertical reading order, using full source sizes.
+fn compact_cards(cards: &mut [CodeCard], anchor: Point, connections: &[Connection]) -> Result<()> {
+    let mut order: Vec<_> = (0..cards.len()).collect();
+    for card in cards.iter() {
+        CardRect::from(card).validate()?;
+    }
+    order.sort_by(|&left, &right| {
+        cards[left]
+            .position
+            .x
+            .total_cmp(&cards[right].position.x)
+            .then(cards[left].position.y.total_cmp(&cards[right].position.y))
+            .then(cards[left].id.cmp(&cards[right].id))
+    });
+    let mut columns: Vec<Vec<usize>> = vec![];
+    let mut right = f32::NEG_INFINITY;
+    for index in order {
+        let card = &cards[index];
+        if columns.is_empty() || card.position.x >= right + CARD_GAP {
+            columns.push(vec![]);
+            right = card.position.x + card.width;
+        } else {
+            right = right.max(card.position.x + card.width);
+        }
+        columns
+            .last_mut()
+            .ok_or("missing layout column")?
+            .push(index);
+    }
+    let mut placements: Vec<(usize, CardRect)> = Vec::with_capacity(cards.len());
+    let mut x = anchor.x;
+    for mut column in columns {
+        column.sort_by(|&left, &right| {
+            cards[left]
+                .position
+                .y
+                .total_cmp(&cards[right].position.y)
+                .then(cards[left].id.cmp(&cards[right].id))
+        });
+        let mut y = anchor.y;
+        let mut width: f32 = 0.0;
+        for index in column {
+            let card = &cards[index];
+            let linked_y = connections
+                .iter()
+                .filter(|edge| edge.to == card.id)
+                .filter_map(|edge| {
+                    let (parent_index, rect) = placements
+                        .iter()
+                        .find(|(parent_index, _)| cards[*parent_index].id == edge.from)?;
+                    Some(
+                        source_anchor_y(&cards[*parent_index], edge.source) + rect.position.y
+                            - cards[*parent_index].position.y,
+                    )
+                })
+                .reduce(f32::min);
+            if let Some(linked_y) = linked_y {
+                y = y.max(linked_y);
+            }
+            let rect = CardRect {
+                position: Point::new(x, y),
+                width: card.width,
+                height: card.display_height(),
+            };
+            rect.validate()?;
+            width = width.max(rect.width);
+            y += rect.height + CARD_GAP;
+            placements.push((index, rect));
+        }
+        x += width + CARD_COLUMN_GAP;
+    }
+    for (index, rect) in placements {
+        cards[index].position = rect.position;
+        cards[index].height = rect.height;
     }
     Ok(())
 }
@@ -667,6 +896,341 @@ mod tests {
         assert!(explorer.session.connections.is_empty());
         assert_eq!(explorer.session.regions.len(), 2);
         assert!(explorer.session.validate().is_ok());
+    }
+
+    #[test]
+    fn toggling_visible_symbols_cleans_links_and_reopens_the_card() {
+        let mut explorer = explorer();
+        let origin = explorer
+            .add_symbol(symbol("origin"), Point::default())
+            .unwrap();
+        let target = explorer
+            .toggle_definition(&origin, Position::new(0, 4))
+            .unwrap()
+            .unwrap()
+            .remove(0);
+        assert_eq!(explorer.session.cards.len(), 2);
+        assert!(
+            explorer
+                .toggle_definition(&origin, Position::new(0, 4))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(explorer.session.cards.len(), 1);
+        assert!(explorer.session.connections.is_empty());
+        assert_eq!(
+            explorer
+                .toggle_definition(&origin, Position::new(0, 4))
+                .unwrap()
+                .unwrap(),
+            vec![target.clone()]
+        );
+        // A search symbol may carry a different opaque ID for the same source range.
+        let mut selected = symbol("target");
+        selected.id = "search-result-id".into();
+        assert!(
+            explorer
+                .toggle_symbol(selected.clone(), Point::default())
+                .unwrap()
+                .is_none()
+        );
+        assert!(explorer.session.connections.is_empty());
+        assert!(
+            !explorer
+                .session
+                .regions
+                .iter()
+                .any(|region| region.card_ids.contains(&target))
+        );
+        assert!(
+            explorer
+                .toggle_symbol(selected, Point::default())
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(explorer.session.cards.len(), 2);
+        explorer.session.validate().unwrap();
+    }
+
+    #[test]
+    fn reference_toggle_keeps_source_and_definition_toggle_hides_every_target() {
+        let mut explorer = explorer();
+        let origin = explorer
+            .add_symbol(symbol("origin"), Point::default())
+            .unwrap();
+        explorer.language.additional.push(symbol("second_target"));
+        explorer
+            .toggle_definition(&origin, Position::new(0, 4))
+            .unwrap();
+        explorer.language.target = symbol("origin");
+        explorer
+            .toggle_references(&origin, Position::new(0, 4))
+            .unwrap();
+        assert!(
+            explorer
+                .toggle_references(&origin, Position::new(0, 4))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(explorer.session.cards.len(), 3);
+        assert!(
+            explorer
+                .toggle_definition(&origin, Position::new(0, 4))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(explorer.session.cards.len(), 1);
+        assert_eq!(explorer.session.cards[0].id, origin);
+        assert!(explorer.session.connections.is_empty());
+        explorer.session.validate().unwrap();
+    }
+
+    #[test]
+    fn closing_a_child_removes_its_descendants_for_every_close_action() {
+        for action in 0..3 {
+            let mut explorer = explorer();
+            let root = explorer
+                .add_symbol(symbol("root"), Point::default())
+                .unwrap();
+            explorer.language.target = symbol("child");
+            let child = explorer
+                .expand_definition(&root, Position::new(0, 4))
+                .unwrap()
+                .remove(0);
+            explorer.language.target = symbol("grandchild");
+            let grandchild = explorer
+                .expand_references(&child, Position::new(0, 4))
+                .unwrap()
+                .remove(0);
+            explorer.language.target = symbol("great_grandchild");
+            explorer
+                .expand_definition(&grandchild, Position::new(0, 4))
+                .unwrap();
+            match action {
+                0 => explorer.remove_card(&child).unwrap(),
+                1 => {
+                    explorer
+                        .toggle_symbol(symbol("child"), Point::default())
+                        .unwrap();
+                }
+                _ => {
+                    explorer
+                        .toggle_definition(&root, Position::new(0, 4))
+                        .unwrap();
+                }
+            }
+            assert_eq!(explorer.session.cards.len(), 1);
+            assert_eq!(explorer.session.cards[0].id, root);
+            assert!(explorer.session.connections.is_empty());
+            explorer.session.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn closing_a_branch_preserves_shared_descendants_and_handles_cycles() {
+        let mut explorer = explorer();
+        let root = explorer
+            .add_symbol(symbol("root"), Point::default())
+            .unwrap();
+        explorer.language.target = symbol("child");
+        let child = explorer
+            .expand_definition(&root, Position::new(0, 4))
+            .unwrap()
+            .remove(0);
+        explorer.language.target = symbol("grandchild");
+        let grandchild = explorer
+            .expand_definition(&child, Position::new(0, 4))
+            .unwrap()
+            .remove(0);
+        explorer.language.target = symbol("child");
+        explorer
+            .expand_definition(&grandchild, Position::new(0, 4))
+            .unwrap();
+        let other = explorer
+            .add_symbol(symbol("other"), Point::new(0.0, 500.0))
+            .unwrap();
+        explorer.language.target = symbol("grandchild");
+        explorer
+            .expand_definition(&other, Position::new(0, 4))
+            .unwrap();
+        explorer.remove_card(&child).unwrap();
+        assert_eq!(explorer.session.cards.len(), 3);
+        assert!(
+            explorer
+                .session
+                .cards
+                .iter()
+                .any(|card| card.id == grandchild)
+        );
+        explorer.remove_card(&other).unwrap();
+        assert_eq!(explorer.session.cards.len(), 1);
+        assert_eq!(explorer.session.cards[0].id, root);
+        explorer.session.validate().unwrap();
+    }
+
+    #[test]
+    fn toggling_a_cyclic_branch_preserves_the_clicked_source() {
+        let mut explorer = explorer();
+        let root = explorer
+            .add_symbol(symbol("root"), Point::default())
+            .unwrap();
+        explorer.language.target = symbol("child");
+        let child = explorer
+            .expand_definition(&root, Position::new(0, 4))
+            .unwrap()
+            .remove(0);
+        explorer.language.target = symbol("root");
+        explorer
+            .expand_definition(&child, Position::new(0, 4))
+            .unwrap();
+        explorer
+            .toggle_definition(&root, Position::new(0, 4))
+            .unwrap();
+        assert_eq!(explorer.session.cards.len(), 1);
+        assert_eq!(explorer.session.cards[0].id, root);
+        assert!(explorer.session.connections.is_empty());
+        explorer.session.validate().unwrap();
+    }
+
+    #[test]
+    fn expansion_and_compaction_anchor_children_to_the_absolute_source_row() {
+        for references in [false, true] {
+            let mut explorer = explorer();
+            explorer.language.code = std::iter::repeat_n("    call();", 100)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut source = symbol("long_parent");
+            source.range = SourceRange {
+                start: Position::new(20, 5),
+                end: Position::new(120, 0),
+            };
+            source.selection_range = SourceRange {
+                start: Position::new(20, 5),
+                end: Position::new(20, 9),
+            };
+            let root = explorer
+                .add_symbol(source, Point::new(100.0, 80.0))
+                .unwrap();
+            let unrelated = explorer
+                .add_symbol(symbol("unrelated"), Point::new(0.0, 3000.0))
+                .unwrap();
+            explorer.language.code = "fn target() {}".into();
+            let position = Position::new(70, 4);
+            let child = if references {
+                explorer.expand_references(&root, position)
+            } else {
+                explorer.expand_definition(&root, position)
+            }
+            .unwrap()
+            .remove(0);
+            let expected_offset = CODE_CARD_HEADER + 8.0 + 50.0 * CODE_LINE_HEIGHT;
+            let assert_anchor = |explorer: &Explorer<Language, Repository>| {
+                let parent = explorer
+                    .session
+                    .cards
+                    .iter()
+                    .find(|card| card.id == root)
+                    .unwrap();
+                let target = explorer
+                    .session
+                    .cards
+                    .iter()
+                    .find(|card| card.id == child)
+                    .unwrap();
+                assert_eq!(target.position.y, parent.position.y + expected_offset);
+                assert_eq!(
+                    target.position.x,
+                    parent.position.x + parent.width + CARD_COLUMN_GAP
+                );
+                assert!(!CardRect::from(parent).overlaps(CardRect::from(target)));
+            };
+            assert_anchor(&explorer);
+            explorer.remove_card(&unrelated).unwrap();
+            assert_anchor(&explorer);
+            explorer.session.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn hiding_cards_packs_rows_and_columns_without_changing_the_viewport() {
+        let mut explorer = explorer();
+        explorer.language.code = std::iter::repeat_n("fn source() {}", 20)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let height = CodeCard::source_height(&SourceDocument {
+            symbol: symbol("root"),
+            code: explorer.language.code.clone(),
+            tokens: vec![],
+        });
+        let root = explorer
+            .add_symbol(symbol("root"), Point::new(100.0, 80.0))
+            .unwrap();
+        let middle = explorer
+            .add_symbol(
+                symbol("middle"),
+                Point::new(100.0, 80.0 + height + CARD_GAP),
+            )
+            .unwrap();
+        let bottom = explorer
+            .add_symbol(
+                symbol("bottom"),
+                Point::new(100.0, 80.0 + 2.0 * (height + CARD_GAP)),
+            )
+            .unwrap();
+        let column = explorer
+            .add_symbol(symbol("column"), Point::new(720.0, 80.0))
+            .unwrap();
+        let far = explorer
+            .add_symbol(symbol("far"), Point::new(1340.0, 80.0))
+            .unwrap();
+        explorer.pan(Point::new(-150.0, 65.0)).unwrap();
+        explorer.zoom(0.75, Point::new(200.0, 180.0)).unwrap();
+        let viewport = explorer.session.viewport;
+        explorer
+            .toggle_symbol(symbol("middle"), Point::default())
+            .unwrap();
+        assert!(!explorer.session.cards.iter().any(|card| card.id == middle));
+        assert_eq!(
+            explorer
+                .session
+                .cards
+                .iter()
+                .find(|card| card.id == bottom)
+                .unwrap()
+                .position,
+            Point::new(100.0, 80.0 + height + CARD_GAP)
+        );
+        explorer.remove_card(&column).unwrap();
+        assert_eq!(
+            explorer
+                .session
+                .cards
+                .iter()
+                .find(|card| card.id == far)
+                .unwrap()
+                .position,
+            Point::new(720.0, 80.0)
+        );
+        assert_eq!(
+            explorer
+                .session
+                .cards
+                .iter()
+                .find(|card| card.id == root)
+                .unwrap()
+                .position,
+            Point::new(100.0, 80.0)
+        );
+        assert_eq!(explorer.session.viewport, viewport);
+        for (index, card) in explorer.session.cards.iter().enumerate() {
+            for other in &explorer.session.cards[index + 1..] {
+                assert!(!CardRect::from(card).overlaps(CardRect::from(other)));
+            }
+        }
+        let before = explorer.session.clone();
+        assert!(explorer.remove_card("missing").is_err());
+        assert_eq!(explorer.session, before);
+        explorer.session.validate().unwrap();
     }
 
     #[test]
