@@ -17,6 +17,10 @@ pub trait LanguageService: Send {
 
     fn files(&mut self) -> Result<Vec<PathBuf>>;
     fn symbols(&mut self, path: &Path) -> Result<Vec<Symbol>>;
+    /// Every language must supply ancestor declaration context for nested symbol excerpts,
+    /// retaining original line numbers and indentation. Top-level/file excerpts have none.
+    /// Include omitted source snapshots so context gaps can be revealed and navigated.
+    /// LSP adapters use the shared extractor; other official backends follow the same contract.
     fn source(&mut self, symbol: &Symbol) -> Result<SourceDocument>;
     fn definitions(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>>;
     fn references(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>>;

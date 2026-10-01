@@ -1,4 +1,5 @@
 //! Language-neutral, read-only LSP sessions and protocol conversion.
+mod context;
 mod conversion;
 mod session;
 pub mod transport;

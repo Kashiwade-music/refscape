@@ -15,6 +15,10 @@ fn card(id: &str, position: Point) -> CodeCard {
     CodeCard {
         id: id.into(),
         source: SourceDocument {
+            expanded: Vec::new(),
+            folded: Vec::new(),
+            context: Vec::new(),
+            code_start: None,
             symbol: Symbol::file(
                 PathBuf::from(format!("/project/{id}.rs")),
                 SourceRange::default(),

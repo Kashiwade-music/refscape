@@ -32,6 +32,10 @@ impl LanguageService for Language {
             return Err("backend unavailable".into());
         }
         Ok(SourceDocument {
+            expanded: Vec::new(),
+            folded: Vec::new(),
+            context: Vec::new(),
+            code_start: None,
             symbol: symbol.clone(),
             code: self.code.clone(),
             tokens: Vec::new(),

@@ -28,7 +28,7 @@ fn clicking_a_linked_word_toggles_cards_even_at_different_glyphs(cx: &mut TestAp
         let click = view.read_with(cx, |view, _| {
             let source = &view.canvas.painted[0];
             point(
-                source.origin.x + source.lines[0].x_for_index(glyph.len()) + px(1.0),
+                source.origin.x + source.rows[0].code.x_for_index(glyph.len()) + px(1.0),
                 source.origin.y + px(5.0),
             )
         });
@@ -78,7 +78,7 @@ fn native_source_click_uses_shaped_glyphs_and_absolute_utf16_positions(cx: &mut 
     let click = view.read_with(cx, |view, _| {
         let card = &view.canvas.painted[0];
         point(
-            card.origin.x + card.lines[0].x_for_index("日本😀".len()) + px(1.0),
+            card.origin.x + card.rows[0].code.x_for_index("日本😀".len()) + px(1.0),
             card.origin.y + px(5.0),
         )
     });

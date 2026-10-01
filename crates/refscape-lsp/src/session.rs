@@ -254,7 +254,27 @@ impl LspSession {
             symbol.range = full_range(&text);
             symbol.selection_range = symbol.range;
         }
-        let code = slice(&text, symbol.range)?.to_string();
+        let range = crate::context::excerpt_range(&text, symbol.range);
+        let code = slice(&text, range)?.to_string();
+        let context = if symbol.kind == "file" {
+            Vec::new()
+        } else {
+            crate::context::source_context(&text, &self.symbols(&path)?, &symbol)
+        };
+        let mut folded = Vec::new();
+        let file_lines: Vec<_> = text.lines().collect();
+        for (index, header) in context.iter().enumerate() {
+            let start = header.start_line + header.code.lines().count() as u32;
+            let end = context
+                .get(index + 1)
+                .map_or(range.start.line, |next| next.start_line);
+            if start < end {
+                folded.push(refscape_model::SourceContext {
+                    start_line: start,
+                    code: format!("{}\n", file_lines[start as usize..end as usize].join("\n")),
+                });
+            }
+        }
         let mut tokens = vec![];
         if self.semantic_tokens {
             if let Some(cached) = self.token_cache.get(&path) {
@@ -268,12 +288,26 @@ impl LspSession {
                     semantic_tokens(&result["data"], &self.token_types, &self.token_modifiers)?;
                 self.token_cache.insert(path, tokens.clone());
             }
-            tokens.retain(|token| token_intersects(token, symbol.range));
+            tokens.retain(|token| {
+                token_intersects(token, range)
+                    || context.iter().any(|header| {
+                        token.line >= header.start_line
+                            && token.line < header.start_line + header.code.lines().count() as u32
+                    })
+                    || folded.iter().any(|gap| {
+                        token.line >= gap.start_line
+                            && token.line < gap.start_line + gap.code.lines().count() as u32
+                    })
+            });
         }
         Ok(SourceDocument {
             symbol,
             code,
             tokens,
+            context,
+            code_start: Some(range.start),
+            folded,
+            expanded: Vec::new(),
         })
     }
 

@@ -10,6 +10,9 @@ pub(super) struct HoverTarget {
 
 impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<L, R> {
     pub(super) fn clear_hover(&mut self, cx: &mut Context<Self>) {
+        if self.canvas.context_hover.take().is_some() {
+            cx.notify();
+        }
         self.hover.task = None;
         self.hover.dismiss_task = None;
         self.hover.pending_target = None;
@@ -62,11 +65,16 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             return None;
         }
         let row = (f32::from(mouse.y - painted.origin.y) / (LINE * zoom)).floor() as usize;
-        let line = painted.lines.get(row)?;
+        if mouse.x < painted.origin.x {
+            return None;
+        }
+        let source_row = painted.rows.get(row)?;
+        let line = &source_row.code;
         let byte = line.index_for_x(mouse.x - painted.origin.x)?;
-        let first_character = if row == 0 { painted.first_character } else { 0 };
+        let source_position = source_row.position?;
+        let first_character = source_position.character;
         let position = Position::new(
-            painted.first_line + row as u32,
+            source_position.line,
             first_character + line.text[..byte].encode_utf16().count() as u32,
         );
         let card = self
@@ -92,6 +100,15 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         if self.requests.busy || self.canvas.drag.is_some() {
             self.clear_hover(cx);
             return;
+        }
+        if let Some(control) = self.context_control_at(mouse) {
+            self.clear_hover(cx);
+            self.canvas.context_hover = Some(control);
+            cx.notify();
+            return;
+        }
+        if self.canvas.context_hover.take().is_some() {
+            cx.notify();
         }
         let target = self.hover_at(mouse);
         if target == self.hover.target {

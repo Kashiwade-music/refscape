@@ -94,17 +94,40 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             }
             let line_index =
                 (f32::from(event.position.y - card.origin.y) / (LINE * zoom)).floor() as usize;
-            if let Some(line) = card.lines.get(line_index)
-                && let Some(byte) = line.index_for_x(event.position.x - card.origin.x)
+            if !references
+                && let Some(row) = card.rows.get(line_index)
+                && let Some(index) = row.fold
+                && (row.position.is_none()
+                    || event.position.x < card.bounds.left() + px(24.0 * zoom))
             {
-                let position = Position::new(
-                    card.first_line + line_index as u32,
-                    line.text[..byte].encode_utf16().count() as u32
-                        + if line_index == 0 {
-                            card.first_character
+                let collapse = row.position.is_some();
+                self.run_job(
+                    if collapse {
+                        "Hiding context…"
+                    } else {
+                        "Expanding context…"
+                    },
+                    Box::new(move |explorer| {
+                        if collapse {
+                            explorer.collapse_context(&id, index)?;
                         } else {
-                            0
-                        },
+                            explorer.expand_context(&id, index)?;
+                        }
+                        Ok(Output::default())
+                    }),
+                    cx,
+                );
+                return;
+            }
+            if let Some(row) = card.rows.get(line_index)
+                && let Some(source_position) = row.position
+                && event.position.x >= card.origin.x
+                && let Some(byte) = row.code.index_for_x(event.position.x - card.origin.x)
+            {
+                let line = &row.code;
+                let position = Position::new(
+                    source_position.line,
+                    line.text[..byte].encode_utf16().count() as u32 + source_position.character,
                 );
                 if self.requests.busy {
                     return;
@@ -210,6 +233,31 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
     pub(super) fn clear_inspection(&mut self) {
         self.canvas.inspection = None;
         self.canvas.selection_generation = self.canvas.selection_generation.wrapping_add(1);
+    }
+
+    pub(super) fn context_control_at(&self, mouse: gpui::Point<Pixels>) -> Option<(String, usize)> {
+        if self.session.viewport.zoom < 0.65 || !self.canvas.bounds.contains(&mouse) {
+            return None;
+        }
+        let card = self
+            .canvas
+            .painted
+            .iter()
+            .rev()
+            .find(|card| card.bounds.contains(&mouse))?;
+        if mouse.y < card.origin.y {
+            return None;
+        }
+        let row = (f32::from(mouse.y - card.origin.y) / (LINE * self.session.viewport.zoom)).floor()
+            as usize;
+        let row = card.rows.get(row)?;
+        let index = row.fold?;
+        if row.position.is_some()
+            && mouse.x >= card.bounds.left() + px(24.0 * self.session.viewport.zoom)
+        {
+            return None;
+        }
+        Some((card.id.clone(), index))
     }
     pub(super) fn mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         if self.requests.closing {

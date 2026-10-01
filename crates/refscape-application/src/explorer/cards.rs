@@ -1,6 +1,119 @@
 use super::*;
 
 impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
+    /// Reveal one contiguous omitted span in this card, retaining its source coordinates.
+    pub fn expand_context(&mut self, id: &str, index: usize) -> Result<()> {
+        let card_index = self
+            .session
+            .cards
+            .iter()
+            .position(|card| card.id == id)
+            .ok_or_else(|| format!("Unknown card {id}"))?;
+        let mut source = self.session.cards[card_index].source.clone();
+        let range = source
+            .folded_range(index)
+            .ok_or("This row has no hidden source")?;
+        let hidden = if let Some(hidden) = source
+            .folded
+            .iter()
+            .find(|gap| gap.start_line == range.start)
+        {
+            hidden.code.clone()
+        } else {
+            // Older saved cards have declaration excerpts but no snapshot of the gaps.
+            let file = self.language.source(&Symbol::file(
+                source.symbol.path.clone(),
+                SourceRange::default(),
+            ))?;
+            file.validate()?;
+            let start = file.code_start.unwrap_or(file.symbol.range.start).line;
+            let offset = range
+                .start
+                .checked_sub(start)
+                .ok_or("Hidden source is outside the document")?;
+            let lines: Vec<_> = file
+                .code
+                .lines()
+                .skip(offset as usize)
+                .take((range.end - range.start) as usize)
+                .collect();
+            if lines.len() != (range.end - range.start) as usize {
+                return Err("Hidden source is outside the document".into());
+            }
+            for token in file
+                .tokens
+                .into_iter()
+                .filter(|token| range.contains(&token.line))
+            {
+                if !source.tokens.contains(&token) {
+                    source.tokens.push(token);
+                }
+            }
+            format!("{}\n", lines.join("\n"))
+        };
+        let context = &mut source.context[index];
+        if !context.code.ends_with('\n') {
+            context.code.push('\n');
+        }
+        context.code.push_str(&hidden);
+        source.expanded.push(refscape_model::SourceContext {
+            start_line: range.start,
+            code: hidden,
+        });
+        source.folded.retain(|gap| gap.start_line != range.start);
+        self.replace_card_source(card_index, source)
+    }
+
+    pub fn collapse_context(&mut self, id: &str, index: usize) -> Result<()> {
+        let card_index = self
+            .session
+            .cards
+            .iter()
+            .position(|card| card.id == id)
+            .ok_or_else(|| format!("Unknown card {id}"))?;
+        let mut source = self.session.cards[card_index].source.clone();
+        let hidden = source
+            .expanded_context(index)
+            .cloned()
+            .ok_or("This section is not expanded")?;
+        let context = &mut source.context[index];
+        context.code = context
+            .code
+            .lines()
+            .take((hidden.start_line - context.start_line) as usize)
+            .collect::<Vec<_>>()
+            .join("\n");
+        source
+            .expanded
+            .retain(|gap| gap.start_line != hidden.start_line);
+        source.folded.push(hidden);
+        source.folded.sort_by_key(|gap| gap.start_line);
+        self.replace_card_source(card_index, source)
+    }
+
+    fn replace_card_source(&mut self, card_index: usize, source: SourceDocument) -> Result<()> {
+        source.validate()?;
+        let mut cards = self.session.cards.clone();
+        let (width, height) = source_dimensions(&source);
+        cards[card_index].source = source;
+        cards[card_index].width = width;
+        cards[card_index].height = height;
+        let anchor = Point::new(
+            cards
+                .iter()
+                .map(|card| card.position.x)
+                .fold(f32::INFINITY, f32::min),
+            cards
+                .iter()
+                .map(|card| card.position.y)
+                .fold(f32::INFINITY, f32::min),
+        );
+        compact_cards(&mut cards, anchor, &self.session.connections)?;
+        self.session.cards = cards;
+        self.rebuild_regions();
+        Ok(())
+    }
+
     pub fn add_symbol(&mut self, symbol: Symbol, position: Point) -> Result<String> {
         if !position.is_finite() {
             return Err("Card position must be finite".into());

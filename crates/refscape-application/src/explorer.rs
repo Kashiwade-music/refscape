@@ -7,8 +7,8 @@ use crate::{
 use refscape_canvas::{
     graph::descendant_cards,
     layout::{
-        CARD_COLUMN_GAP, CARD_GAP, CardRect, arrange_cards, compact_cards, source_anchor_y,
-        source_dimensions, vacant_position,
+        CARD_COLUMN_GAP, CARD_GAP, CardRect, arrange_cards, arrange_connected_cards, compact_cards,
+        source_anchor_y, source_dimensions, vacant_position,
     },
     regions::build_regions,
 };

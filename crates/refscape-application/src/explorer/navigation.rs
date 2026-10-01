@@ -27,7 +27,7 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
             .iter()
             .find(|card| card.id == card_id)
             .ok_or_else(|| format!("Unknown card {card_id}"))?;
-        if !card.source.symbol.range.contains(position) {
+        if !card.source.contains_display_position(position) {
             return Err("Requested source position is outside the card".into());
         }
         self.language.hover(&card.source.symbol.path, position)
@@ -52,7 +52,7 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
             .iter()
             .find(|card| card.id == card_id)
             .ok_or_else(|| format!("Unknown card {card_id}"))?;
-        if !card.source.symbol.range.contains(position) {
+        if !card.source.contains_display_position(position) {
             return Err("Requested source position is outside the card".into());
         }
         let Some(token) = card.source.variable_token(position) else {
@@ -144,7 +144,7 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
             .find(|c| c.id == card_id)
             .cloned()
             .ok_or_else(|| format!("Unknown card {card_id}"))?;
-        if !origin.source.symbol.range.contains(position) {
+        if !origin.source.contains_display_position(position) {
             return Err("Requested source position is outside the card".into());
         }
         let symbols = match kind {
@@ -195,6 +195,7 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
             };
             placements.push((source, placement));
         }
+        let before = self.session.clone();
         let mut ids = Vec::new();
         for (source, placement) in placements {
             let target = self.insert_source(source, placement);
@@ -225,6 +226,12 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
                     source: position,
                 });
             }
+        }
+        if let Err(error) =
+            arrange_connected_cards(&mut self.session.cards, &self.session.connections)
+        {
+            self.session = before;
+            return Err(error);
         }
         self.rebuild_regions();
         Ok(ids)

@@ -32,11 +32,11 @@ fn source_hover_is_debounced_and_uses_absolute_utf16_at_each_zoom(cx: &mut TestA
             let card = &view.canvas.painted[0];
             (
                 point(
-                    card.origin.x + card.lines[0].x_for_index("日本😀".len()) + px(1.0),
+                    card.origin.x + card.rows[0].code.x_for_index("日本😀".len()) + px(1.0),
                     card.origin.y + px(5.0 * zoom),
                 ),
                 point(
-                    card.origin.x + card.lines[0].x_for_index("日本😀ca".len()) + px(1.0),
+                    card.origin.x + card.rows[0].code.x_for_index("日本😀ca".len()) + px(1.0),
                     card.origin.y + px(5.0 * zoom),
                 ),
                 point(card.bounds.left() + px(20.0), card.bounds.top() + px(10.0)),
@@ -145,7 +145,7 @@ fn long_hover_documentation_scrolls_without_moving_the_canvas(cx: &mut TestAppCo
     let word = view.read_with(cx, |view, _| {
         let card = &view.canvas.painted[0];
         point(
-            card.origin.x + card.lines[0].x_for_index("日本😀".len()) + px(1.0),
+            card.origin.x + card.rows[0].code.x_for_index("日本😀".len()) + px(1.0),
             card.origin.y + px(5.0),
         )
     });
@@ -226,7 +226,7 @@ fn hover_cancels_when_zooming_and_never_requests_hidden_source(cx: &mut TestAppC
     let word = view.read_with(cx, |view, _| {
         let card = &view.canvas.painted[0];
         point(
-            card.origin.x + card.lines[0].x_for_index("日本😀".len()) + px(1.0),
+            card.origin.x + card.rows[0].code.x_for_index("日本😀".len()) + px(1.0),
             card.origin.y + px(5.0),
         )
     });

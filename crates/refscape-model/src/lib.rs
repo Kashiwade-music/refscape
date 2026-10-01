@@ -1,6 +1,6 @@
 //! UI-independent source, canvas, session, and theme models and invariants.
 
-use std::{collections::HashSet, path::PathBuf};
+use std::{borrow::Cow, collections::HashSet, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -127,9 +127,176 @@ pub struct SourceDocument {
     pub code: String,
     #[serde(default)]
     pub tokens: Vec<SemanticToken>,
+    /// Ancestor declaration excerpts supplied by the official language backend.
+    #[serde(default)]
+    pub context: Vec<SourceContext>,
+    /// Includes the first line's indentation without changing the symbol's identity.
+    #[serde(default)]
+    pub code_start: Option<Position>,
+    /// Source snapshots of the gaps between ancestor declarations and the symbol body.
+    #[serde(default)]
+    pub folded: Vec<SourceContext>,
+    /// Revealed gap snapshots retained so each section can be folded again.
+    #[serde(default)]
+    pub expanded: Vec<SourceContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceContext {
+    pub start_line: u32,
+    pub code: String,
+}
+
+pub struct SourceLine<'a> {
+    pub position: Option<Position>,
+    pub text: Cow<'a, str>,
+    pub fold: Option<usize>,
 }
 
 impl SourceDocument {
+    /// Reserve separate control and number columns using the entire excerpt's line range.
+    /// Revealing hidden rows cannot change the code or line-number column's position.
+    pub fn code_gutter_width(&self) -> f32 {
+        let start = self.code_start.unwrap_or(self.symbol.range.start).line;
+        let last = (u64::from(start) + self.code.lines().count() as u64)
+            .max(u64::from(self.symbol.range.end.line) + 1);
+        let digits = last.to_string().len().max(3);
+        24.0 + digits as f32 * 8.0 + 12.0
+    }
+
+    /// Display rows retain document coordinates; folded gaps have no source position.
+    pub fn display_lines(&self) -> Vec<SourceLine<'_>> {
+        let mut lines = Vec::new();
+        let start = self.code_start.unwrap_or(self.symbol.range.start);
+        for (index, context) in self.context.iter().enumerate() {
+            let mut end_line = context.start_line;
+            for (row, text) in context.code.lines().enumerate() {
+                end_line = context.start_line + row as u32;
+                lines.push(SourceLine {
+                    position: Some(Position::new(end_line, 0)),
+                    text: Cow::Borrowed(text),
+                    fold: self
+                        .expanded
+                        .iter()
+                        .any(|gap| gap.start_line == end_line)
+                        .then_some(index),
+                });
+            }
+            let next_line = self
+                .context
+                .get(index + 1)
+                .map_or(start.line, |c| c.start_line);
+            if end_line + 1 < next_line {
+                lines.push(SourceLine {
+                    position: None,
+                    text: Cow::Owned(format!("    ... (Show {} Lines)", next_line - end_line - 1)),
+                    fold: Some(index),
+                });
+            }
+        }
+        lines.extend(self.code.lines().enumerate().map(|(row, text)| SourceLine {
+            position: Some(Position::new(
+                start.line + row as u32,
+                if row == 0 { start.character } else { 0 },
+            )),
+            text: Cow::Borrowed(text),
+            fold: None,
+        }));
+        lines
+    }
+
+    pub fn display_row(&self, position: Position) -> Option<usize> {
+        self.display_lines().iter().position(|line| {
+            line.position
+                .is_some_and(|start| start.line == position.line)
+        })
+    }
+
+    /// Links from temporarily hidden code stay anchored to its collapsed section.
+    pub fn display_anchor_row(&self, position: Position) -> Option<usize> {
+        self.display_row(position).or_else(|| {
+            self.display_lines().iter().position(|line| {
+                line.position.is_none()
+                    && line.fold.is_some_and(|index| {
+                        self.folded_range(index)
+                            .is_some_and(|range| range.contains(&position.line))
+                    })
+            })
+        })
+    }
+
+    pub fn expanded_context(&self, index: usize) -> Option<&SourceContext> {
+        let context = self.context.get(index)?;
+        let end = context
+            .start_line
+            .checked_add(context.code.lines().count() as u32)?;
+        self.expanded.iter().find(|gap| {
+            gap.start_line > context.start_line
+                && gap.start_line.checked_add(gap.code.lines().count() as u32) == Some(end)
+        })
+    }
+
+    /// Recover controls for snapshots saved before revealed spans had explicit metadata.
+    /// Declaration boundaries come from the backend; all revealed text stays from the snapshot.
+    pub fn recover_expanded_context(&mut self, declarations: &[SourceContext]) {
+        for (index, context) in self.context.iter().enumerate() {
+            if self.expanded_context(index).is_some() || self.folded_range(index).is_some() {
+                continue;
+            }
+            let Some(header) = declarations
+                .iter()
+                .find(|header| header.start_line == context.start_line)
+            else {
+                continue;
+            };
+            let count = header.code.lines().count();
+            if count == 0
+                || count >= context.code.lines().count()
+                || !context.code.lines().take(count).eq(header.code.lines())
+            {
+                continue;
+            }
+            self.expanded.push(SourceContext {
+                start_line: context.start_line + count as u32,
+                code: format!(
+                    "{}\n",
+                    context
+                        .code
+                        .lines()
+                        .skip(count)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            });
+        }
+    }
+
+    /// Only real, currently displayed source can be used for navigation, including context.
+    pub fn contains_display_position(&self, position: Position) -> bool {
+        if self.symbol.range.contains(position) {
+            return true;
+        }
+        self.context.iter().any(|context| {
+            position
+                .line
+                .checked_sub(context.start_line)
+                .and_then(|row| context.code.lines().nth(row as usize))
+                .is_some_and(|text| position.character < text.encode_utf16().count() as u32)
+        })
+    }
+
+    pub fn folded_range(&self, index: usize) -> Option<std::ops::Range<u32>> {
+        let context = self.context.get(index)?;
+        let start = context
+            .start_line
+            .checked_add(context.code.lines().count() as u32)?;
+        let end = self.context.get(index + 1).map_or(
+            self.code_start.unwrap_or(self.symbol.range.start).line,
+            |next| next.start_line,
+        );
+        (start < end).then_some(start..end)
+    }
+
     /// Classification comes from semantic tokens supplied by the language backend.
     pub fn variable_token(&self, position: Position) -> Option<&SemanticToken> {
         self.tokens.iter().find(|token| {
@@ -145,6 +312,58 @@ impl SourceDocument {
 
     pub fn validate(&self) -> Result<(), String> {
         self.symbol.validate()?;
+        let start = self.code_start.unwrap_or(self.symbol.range.start);
+        if start.line != self.symbol.range.start.line
+            || start.character > self.symbol.range.start.character
+        {
+            return Err("Source excerpt must start on the symbol's first line".into());
+        }
+        let mut previous_end = None;
+        for context in &self.context {
+            let count = u32::try_from(context.code.lines().count())
+                .map_err(|_| "Source context is too long")?;
+            let end = context
+                .start_line
+                .checked_add(count)
+                .ok_or("Source context line overflow")?;
+            if count == 0
+                || end > start.line
+                || previous_end.is_some_and(|previous| previous > context.start_line)
+            {
+                return Err("Source context must precede the excerpt in source order".into());
+            }
+            previous_end = Some(end);
+        }
+        let mut seen = HashSet::new();
+        for folded in &self.folded {
+            if !seen.insert(folded.start_line)
+                || !self.context.iter().enumerate().any(|(index, _)| {
+                    self.folded_range(index).is_some_and(|range| {
+                        range.start == folded.start_line
+                            && folded.code.lines().count() == (range.end - range.start) as usize
+                    })
+                })
+            {
+                return Err("Folded source must match an omitted context range".into());
+            }
+        }
+        for expanded in &self.expanded {
+            if expanded.code.lines().count() == 0
+                || !seen.insert(expanded.start_line)
+                || !self.context.iter().enumerate().any(|(index, context)| {
+                    self.expanded_context(index).is_some_and(|gap| {
+                        gap == expanded
+                            && context
+                                .code
+                                .lines()
+                                .skip((gap.start_line - context.start_line) as usize)
+                                .eq(gap.code.lines())
+                    })
+                })
+            {
+                return Err("Expanded source must match the end of its context section".into());
+            }
+        }
         if self
             .tokens
             .iter()
@@ -234,7 +453,7 @@ impl CodeCard {
     }
 
     pub fn source_height(source: &SourceDocument) -> f32 {
-        (CODE_CARD_HEADER + source.code.lines().count().max(1) as f32 * CODE_LINE_HEIGHT + 24.0)
+        (CODE_CARD_HEADER + source.display_lines().len().max(1) as f32 * CODE_LINE_HEIGHT + 24.0)
             .max(128.0)
     }
 }
@@ -482,6 +701,108 @@ pub fn utf16_byte_offset(text: &str, column: u32) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folded_display_retains_source_coordinates_and_counts_context_in_card_height() {
+        let range = SourceRange {
+            start: Position::new(74, 4),
+            end: Position::new(74, 20),
+        };
+        let mut source = SourceDocument {
+            expanded: Vec::new(),
+            folded: Vec::new(),
+            symbol: Symbol::file("project.rs".into(), range),
+            code: "    fn options() {}".into(),
+            code_start: Some(Position::new(74, 0)),
+            tokens: vec![],
+            context: vec![SourceContext {
+                start_line: 51,
+                code: "impl CppProject {".into(),
+            }],
+        };
+        source.validate().unwrap();
+        let lines = source.display_lines();
+        assert_eq!(lines[0].position, Some(Position::new(51, 0)));
+        assert_eq!(lines[1].position, None);
+        assert_eq!(lines[1].text, "    ... (Show 22 Lines)");
+        assert_eq!(lines[2].position, Some(Position::new(74, 0)));
+        assert_eq!(source.display_row(Position::new(74, 7)), Some(2));
+        assert_eq!(CodeCard::source_height(&source), 136.0);
+        source.context[0].start_line = 74;
+        assert!(source.validate().is_err());
+    }
+
+    #[test]
+    fn gutter_reserves_full_source_line_numbers_even_while_context_is_folded() {
+        let range = SourceRange {
+            start: Position::new(10_000, 4),
+            end: Position::new(10_000, 20),
+        };
+        let mut source = SourceDocument {
+            symbol: Symbol::file("project.rs".into(), range),
+            code: "    fn options() {}".into(),
+            tokens: vec![],
+            code_start: None,
+            context: vec![SourceContext {
+                start_line: 9_998,
+                code: "impl Project {".into(),
+            }],
+            folded: vec![],
+            expanded: vec![],
+        };
+        source.validate().unwrap();
+        assert_eq!(source.code_gutter_width(), 76.0);
+        assert_eq!(source.display_lines()[1].text, "    ... (Show 1 Lines)");
+        source.context[0].code.push_str("\n    fn first() {}\n");
+        source.validate().unwrap();
+        assert_eq!(source.code_gutter_width(), 76.0);
+    }
+
+    #[test]
+    fn legacy_revealed_context_recovers_controls_from_backend_declaration_boundaries() {
+        let range = SourceRange {
+            start: Position::new(5, 4),
+            end: Position::new(5, 20),
+        };
+        let header = SourceContext {
+            start_line: 0,
+            code: "impl\n    Project {".into(),
+        };
+        let mut source = SourceDocument {
+            symbol: Symbol::file("project.rs".into(), range),
+            code: "    fn options() {}".into(),
+            code_start: None,
+            tokens: vec![],
+            context: vec![SourceContext {
+                start_line: 0,
+                code: "impl\n    Project {\n    fn first() {}\n\n\n".into(),
+            }],
+            folded: vec![],
+            expanded: vec![],
+        };
+        let original_code = source.context[0].code.clone();
+        source.recover_expanded_context(std::slice::from_ref(&header));
+        source.recover_expanded_context(std::slice::from_ref(&header));
+        assert_eq!(source.context[0].code, original_code);
+        assert_eq!(source.expanded.len(), 1);
+        assert_eq!(source.expanded[0].start_line, 2);
+        assert_eq!(source.expanded[0].code, "    fn first() {}\n\n\n");
+        assert_eq!(source.display_lines()[2].fold, Some(0));
+        source.validate().unwrap();
+        source.expanded[0].code = "    changed();\n\n\n".into();
+        assert!(source.validate().is_err());
+
+        source.expanded.clear();
+        source.context[0] = header.clone();
+        source.recover_expanded_context(std::slice::from_ref(&header));
+        assert!(source.expanded.is_empty()); // Multiline declarations are not revealed gaps.
+        source.context[0].code = original_code;
+        source.recover_expanded_context(&[SourceContext {
+            start_line: 0,
+            code: "impl ChangedProject {".into(),
+        }]);
+        assert!(source.expanded.is_empty()); // Changed declarations cannot rewrite saved text.
+    }
 
     #[test]
     fn utf16_offsets_preserve_unicode_boundaries() {

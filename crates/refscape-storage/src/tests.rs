@@ -118,6 +118,10 @@ fn session_roundtrip_preserves_canvas_code_connections_and_theme() {
         session.cards.push(CodeCard {
             id: id.into(),
             source: SourceDocument {
+                expanded: Vec::new(),
+                folded: Vec::new(),
+                context: Vec::new(),
+                code_start: None,
                 symbol: Symbol::file(directory.path(&format!("{id}.rs")), range),
                 code: format!("fn {id}() {{}}\n"),
                 tokens: vec![],
@@ -127,6 +131,38 @@ fn session_roundtrip_preserves_canvas_code_connections_and_theme() {
             height: 320.0,
         });
     }
+    // Declaration context and indentation survive saving; older snapshots default to no context.
+    let legacy = serde_json::to_value(&session.cards[0].source).unwrap();
+    let mut legacy = legacy.as_object().unwrap().clone();
+    legacy.remove("context");
+    legacy.remove("code_start");
+    legacy.remove("folded");
+    legacy.remove("expanded");
+    let old_source: SourceDocument =
+        serde_json::from_value(serde_json::Value::Object(legacy)).unwrap();
+    assert!(old_source.context.is_empty());
+    assert_eq!(old_source.code_start, None);
+    assert!(old_source.folded.is_empty());
+    assert!(old_source.expanded.is_empty());
+    session.cards[1].source.symbol.range.start = Position::new(5, 4);
+    session.cards[1].source.symbol.range.end = Position::new(6, 0);
+    session.cards[1].source.symbol.selection_range = session.cards[1].source.symbol.range;
+    session.cards[1].source.code_start = Some(Position::new(5, 0));
+    session.cards[1].source.code = "    fn run() {}".into();
+    session.cards[1]
+        .source
+        .context
+        .push(refscape_model::SourceContext {
+            start_line: 1,
+            code: "impl Sample {".into(),
+        });
+    session.cards[1]
+        .source
+        .folded
+        .push(refscape_model::SourceContext {
+            start_line: 2,
+            code: "    fn first() {}\n\n\n".into(),
+        });
     session.connections.push(Connection {
         id: "main-to-run".into(),
         from: "main".into(),
@@ -152,6 +188,14 @@ fn session_roundtrip_preserves_canvas_code_connections_and_theme() {
         zoom: 0.75,
     };
     session.theme = Theme::light();
+    JsonSessionRepository.save(&path, &session).unwrap();
+    assert_eq!(JsonSessionRepository.load(&path).unwrap(), session);
+    let hidden = session.cards[1].source.folded.remove(0);
+    session.cards[1].source.context[0].code.push('\n');
+    session.cards[1].source.context[0]
+        .code
+        .push_str(&hidden.code);
+    session.cards[1].source.expanded.push(hidden);
     JsonSessionRepository.save(&path, &session).unwrap();
     assert_eq!(JsonSessionRepository.load(&path).unwrap(), session);
     session.cards[0].position = Point::new(999.0, -222.0);

@@ -20,7 +20,7 @@ fn variable_click_highlights_identity_and_toggles_type_at_any_glyph(cx: &mut Tes
         let click = view.read_with(cx, |view, _| {
             let source = &view.canvas.painted[0];
             point(
-                source.origin.x + source.lines[0].x_for_index(glyph.len()) + px(1.0),
+                source.origin.x + source.rows[0].code.x_for_index(glyph.len()) + px(1.0),
                 source.origin.y + px(5.0),
             )
         });
@@ -89,7 +89,7 @@ fn primitive_variable_keeps_highlights_and_alt_click_opens_binding(cx: &mut Test
     let click = view.read_with(cx, |view, _| {
         let source = &view.canvas.painted[0];
         point(
-            source.origin.x + source.lines[0].x_for_index("日本😀".len()) + px(1.0),
+            source.origin.x + source.rows[0].code.x_for_index("日本😀".len()) + px(1.0),
             source.origin.y + px(5.0),
         )
     });
@@ -147,7 +147,7 @@ fn clearing_selection_during_analysis_does_not_restore_stale_highlights(cx: &mut
     let click = view.read_with(cx, |view, _| {
         let source = &view.canvas.painted[0];
         point(
-            source.origin.x + source.lines[0].x_for_index("日本😀".len()) + px(1.0),
+            source.origin.x + source.rows[0].code.x_for_index("日本😀".len()) + px(1.0),
             source.origin.y + px(5.0),
         )
     });

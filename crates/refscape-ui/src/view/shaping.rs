@@ -12,18 +12,13 @@ pub(super) struct CodeConnection {
 /// Locate the displayed word using the server's absolute UTF-16 token range.
 /// Without semantic tokens, use ordinary text word selection, never code analysis.
 pub(super) fn connected_word(card: &CodeCard, position: Position) -> Option<(usize, Range<usize>)> {
-    if !card.source.symbol.range.contains(position) {
+    if !card.source.contains_display_position(position) {
         return None;
     }
-    let row = position
-        .line
-        .checked_sub(card.source.symbol.range.start.line)? as usize;
-    let text = card.source.code.lines().nth(row)?;
-    let first_character = if row == 0 {
-        card.source.symbol.range.start.character
-    } else {
-        0
-    };
+    let row = card.source.display_row(position)?;
+    let lines = card.source.display_lines();
+    let text = lines.get(row)?.text.as_ref();
+    let first_character = lines[row].position?.character;
     if let Some(token) = card.source.tokens.iter().find(|token| {
         token.line == position.line
             && token.start <= position.character
@@ -80,15 +75,12 @@ pub(super) fn code_connections(
                 .find(|card| card.id == connection.from)?;
             let to = session.cards.iter().find(|card| card.id == connection.to)?;
             let (row, span) = connected_word(from, connection.source)?;
-            let text = from.source.code.lines().nth(row)?;
+            let lines = from.source.display_lines();
+            let text = lines.get(row)?.text.as_ref();
             let runs = code_runs(
                 text,
                 connection.source.line,
-                if row == 0 {
-                    from.source.symbol.range.start.character
-                } else {
-                    0
-                },
+                lines[row].position?.character,
                 &from.source.tokens,
                 &session.theme.palette,
             );
@@ -99,7 +91,7 @@ pub(super) fn code_connections(
                 None,
             );
             let rect = card_bounds(from, session, canvas);
-            let x = rect.left() + px(54.0 * zoom);
+            let x = rect.left() + px(from.source.code_gutter_width() * zoom);
             let y = rect.top()
                 + px((HEADER + 8.0 + row as f32 * LINE) * zoom)
                 + gpui::underline_y_offset(px(LINE * zoom), line.ascent, line.descent);
@@ -133,9 +125,9 @@ pub(super) fn card_title(session: &Session, card: &CodeCard) -> String {
             continue;
         };
         if let Some((row, span)) = connected_word(origin, edge.source)
-            && let Some(line) = origin.source.code.lines().nth(row)
+            && let Some(line) = origin.source.display_lines().get(row)
         {
-            let name = line[span].to_string();
+            let name = line.text[span].to_string();
             if !variables.contains(&name) {
                 variables.push(name);
             }
@@ -159,15 +151,16 @@ pub(super) fn variable_highlight_spans(
     else {
         return Vec::new();
     };
-    let Some(text) = card.source.code.lines().nth(row) else {
+    let lines = card.source.display_lines();
+    let Some(source) = lines.get(row) else {
         return Vec::new();
     };
-    let line = card.source.symbol.range.start.line + row as u32;
-    let first_character = if row == 0 {
-        card.source.symbol.range.start.character
-    } else {
-        0
+    let Some(position) = source.position else {
+        return Vec::new();
     };
+    let text = source.text.as_ref();
+    let line = position.line;
+    let first_character = position.character;
     let last_character = first_character + text.encode_utf16().count() as u32;
     inspection
         .highlights

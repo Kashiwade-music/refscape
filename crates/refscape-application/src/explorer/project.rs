@@ -92,6 +92,18 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
             session.project_options = effective_options;
         }
         let project_crates = self.language.project_crates()?;
+        for card in &mut session.cards {
+            if card.source.expanded.is_empty()
+                && card
+                    .source
+                    .context
+                    .iter()
+                    .any(|header| header.code.lines().count() > 1)
+                && let Ok(current) = self.language.source(&card.source.symbol)
+            {
+                card.source.recover_expanded_context(&current.context);
+            }
+        }
         self.session = session;
         self.project_crates = project_crates;
         Ok(())

@@ -83,6 +83,7 @@ pub(crate) struct CanvasState {
     pub(crate) inspection: Option<VariableInspection>,
     selection_generation: u64,
     bounds: Bounds<Pixels>,
+    context_hover: Option<(String, usize)>,
 }
 
 #[derive(Default)]

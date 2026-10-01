@@ -8,6 +8,135 @@ use std::{
 };
 
 #[test]
+#[ignore = "requires rust-analyzer"]
+fn real_server_preserves_nested_module_and_impl_context_on_method_cards() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = env::temp_dir().join(format!("refscape-context-{}-{unique}", std::process::id()));
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("Cargo.toml"), "[package]\nname = \"context_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n").unwrap();
+    let code = "mod outer {\n    pub struct CppProject;\n    impl CppProject {\n        pub fn first(&self) {}\n\n        pub(crate) fn options(&self) -> u32 {\n            42\n        }\n    }\n}\nfn main() {}\n";
+    let path = root.join("src/main.rs");
+    fs::write(&path, code).unwrap();
+    let mut language = RustAnalyzer::default().with_timeout(Duration::from_secs(30));
+    language
+        .open_project(&root, &refscape_model::ProjectOptions::default())
+        .unwrap();
+    fn find(symbols: &[Symbol]) -> Option<&Symbol> {
+        symbols.iter().find_map(|symbol| {
+            if symbol.name == "options" {
+                Some(symbol)
+            } else {
+                find(&symbol.children)
+            }
+        })
+    }
+    let symbols = language.symbols(&path).unwrap();
+    let method = find(&symbols).expect("options method from rust-analyzer");
+    let source = language.source(method).unwrap();
+    assert_eq!(
+        source.context,
+        vec![
+            refscape_model::SourceContext {
+                start_line: 0,
+                code: "mod outer {".into()
+            },
+            refscape_model::SourceContext {
+                start_line: 2,
+                code: "    impl CppProject {".into()
+            },
+        ]
+    );
+    assert!(
+        source.code.starts_with("        pub(crate) fn options"),
+        "{}",
+        source.code
+    );
+    assert_eq!(source.code_start, Some(Position::new(5, 0)));
+    let rows = source.display_lines();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.position.map(|p| p.line))
+            .collect::<Vec<_>>(),
+        vec![Some(0), None, Some(2), None, Some(5), Some(6), Some(7)]
+    );
+    assert_eq!(source.display_row(Position::new(5, 30)), Some(4));
+    source.validate().unwrap();
+    assert!(source.folded[1].code.contains("pub fn first"));
+    struct NoSession;
+    impl refscape_application::ports::SessionRepository for NoSession {
+        fn save(&self, _: &std::path::Path, _: &refscape_model::Session) -> Result<(), String> {
+            unreachable!()
+        }
+        fn load(&self, _: &std::path::Path) -> Result<refscape_model::Session, String> {
+            unreachable!()
+        }
+    }
+    let mut explorer = refscape_application::explorer::Explorer::new(language, NoSession);
+    explorer
+        .open_project(&root, &refscape_model::ProjectOptions::default())
+        .unwrap();
+    let id = explorer
+        .add_symbol(method.clone(), refscape_model::Point::default())
+        .unwrap();
+    let type_column = code.lines().nth(2).unwrap().find("CppProject").unwrap() as u32;
+    let target = explorer
+        .expand_definition(&id, Position::new(2, type_column))
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        explorer
+            .session()
+            .cards
+            .iter()
+            .find(|card| card.id == target)
+            .unwrap()
+            .source
+            .symbol
+            .kind,
+        "struct"
+    );
+    explorer.expand_context(&id, 1).unwrap();
+    let card = explorer
+        .session()
+        .cards
+        .iter()
+        .find(|card| card.id == id)
+        .unwrap();
+    assert_eq!(card.source.display_row(Position::new(5, 30)), Some(5));
+    assert!(card.source.contains_display_position(Position::new(3, 15)));
+    assert!(card.source.context[1].code.contains("pub fn first"));
+    let expanded = card.source.clone();
+    explorer.collapse_context(&id, 1).unwrap();
+    assert_eq!(
+        explorer
+            .session()
+            .cards
+            .iter()
+            .find(|card| card.id == id)
+            .unwrap()
+            .source,
+        source
+    );
+    explorer.expand_context(&id, 1).unwrap();
+    assert_eq!(
+        explorer
+            .session()
+            .cards
+            .iter()
+            .find(|card| card.id == id)
+            .unwrap()
+            .source,
+        expanded
+    );
+    explorer.session().validate().unwrap();
+    drop(explorer);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 #[ignore = "requires rust-analyzer; run cargo test -p refscape-language-rust --test rust_analyzer -- --ignored"]
 fn real_server_resolves_inferred_variable_types_and_scope_aware_highlights() {
     let unique = SystemTime::now()

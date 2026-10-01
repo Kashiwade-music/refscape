@@ -1,5 +1,5 @@
 //! Render a real GPUI scene into a PNG for visual verification.
-//! cargo run -p refscape-app --example render --features visual-tests -- PROJECT OUTPUT [light] [variable] [--compile-commands PATH]
+//! cargo run -p refscape-app --example render --features visual-tests -- PROJECT OUTPUT [light] [variable] [unfold] [--compile-commands PATH]
 use std::{env, path::PathBuf};
 
 use refscape_application::explorer::Explorer;
@@ -77,6 +77,21 @@ fn main() {
             explorer.toggle_type_definition(&id, call).unwrap();
         } else {
             explorer.expand_definition(&id, call).unwrap();
+        }
+    }
+    if options.iter().any(|option| option == "unfold") {
+        let gaps: Vec<_> = explorer
+            .session()
+            .cards
+            .iter()
+            .flat_map(|card| {
+                (0..card.source.context.len())
+                    .filter(|&index| card.source.folded_range(index).is_some())
+                    .map(|index| (card.id.clone(), index))
+            })
+            .collect();
+        for (id, index) in gaps {
+            explorer.expand_context(&id, index).unwrap();
         }
     }
     let cards = &explorer.session().cards;

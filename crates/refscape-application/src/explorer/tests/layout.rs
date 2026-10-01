@@ -2,6 +2,259 @@ use super::*;
 use refscape_model::{CODE_CARD_HEADER, CODE_LINE_HEIGHT};
 
 #[test]
+fn unfolding_context_reanchors_children_and_preserves_navigation_and_transactions() {
+    let mut explorer = explorer();
+    let mut parent = symbol("root");
+    parent.range.start = Position::new(12, 0);
+    parent.range.end = Position::new(12, 14);
+    parent.selection_range.start.line = 12;
+    parent.selection_range.end.line = 12;
+    let root = explorer
+        .add_symbol(parent, Point::new(100.0, 80.0))
+        .unwrap();
+    explorer.session.cards[0]
+        .source
+        .context
+        .push(refscape_model::SourceContext {
+            start_line: 0,
+            code: "impl Project {".into(),
+        });
+    explorer.session.cards[0]
+        .source
+        .folded
+        .push(refscape_model::SourceContext {
+            start_line: 1,
+            code: format!("{}\n{}", "x".repeat(120), "    call();\n".repeat(10)),
+        });
+    let child = explorer
+        .expand_definition(&root, Position::new(12, 4))
+        .unwrap()
+        .remove(0);
+    let before_y = explorer
+        .session
+        .cards
+        .iter()
+        .find(|card| card.id == child)
+        .unwrap()
+        .position
+        .y;
+    assert!(
+        explorer
+            .expand_definition(&root, Position::new(1, 4))
+            .is_err()
+    );
+    let before = explorer.session.clone();
+    assert!(explorer.expand_context(&root, 4).is_err());
+    assert_eq!(explorer.session, before);
+    explorer.language.fail = true;
+    explorer.expand_context(&root, 0).unwrap(); // New snapshots do not reread externally modified source.
+    let card = explorer
+        .session
+        .cards
+        .iter()
+        .find(|card| card.id == root)
+        .unwrap();
+    assert!(card.source.folded.is_empty());
+    assert_eq!(card.source.display_row(Position::new(12, 4)), Some(12));
+    assert_eq!(
+        explorer
+            .session
+            .cards
+            .iter()
+            .find(|card| card.id == child)
+            .unwrap()
+            .position
+            .y,
+        before_y + 10.0 * CODE_LINE_HEIGHT
+    );
+    assert_eq!(
+        explorer
+            .session
+            .cards
+            .iter()
+            .find(|child_card| child_card.id == child)
+            .unwrap()
+            .position
+            .x,
+        card.position.x + card.width + CARD_COLUMN_GAP
+    );
+    explorer.language.fail = false;
+    explorer.language.target = symbol("context_target");
+    let targets = explorer
+        .expand_definition(&root, Position::new(0, 5))
+        .unwrap();
+    assert_eq!(targets.len(), 1);
+    assert!(explorer.hover(&root, Position::new(1, 4)).is_ok());
+    explorer
+        .expand_definition(&root, Position::new(1, 4))
+        .unwrap();
+    let expanded_source = explorer
+        .session
+        .cards
+        .iter()
+        .find(|card| card.id == root)
+        .unwrap()
+        .source
+        .clone();
+    let before = explorer.session.clone();
+    assert!(explorer.collapse_context(&root, 4).is_err());
+    assert_eq!(explorer.session, before);
+    explorer.language.fail = true;
+    explorer.collapse_context(&root, 0).unwrap();
+    let card = explorer
+        .session
+        .cards
+        .iter()
+        .find(|card| card.id == root)
+        .unwrap();
+    assert_eq!(card.source.context[0].code, "impl Project {");
+    assert!(card.source.expanded.is_empty());
+    assert_eq!(card.source.folded[0].code.lines().count(), 11);
+    assert_eq!(card.width, 520.0);
+    assert_eq!(card.display_height(), 136.0);
+    assert_eq!(
+        source_anchor_y(card, Position::new(1, 4)),
+        card.position.y + CODE_CARD_HEADER + 8.0 + CODE_LINE_HEIGHT
+    );
+    assert!(
+        explorer
+            .session
+            .cards
+            .iter()
+            .find(|card| card.id == child)
+            .unwrap()
+            .position
+            .y
+            >= source_anchor_y(card, Position::new(12, 4))
+    );
+    assert!(explorer.hover(&root, Position::new(1, 4)).is_err());
+    explorer.expand_context(&root, 0).unwrap();
+    assert_eq!(
+        explorer
+            .session
+            .cards
+            .iter()
+            .find(|card| card.id == root)
+            .unwrap()
+            .source,
+        expanded_source
+    );
+    explorer.session.validate().unwrap();
+}
+
+#[test]
+fn legacy_context_gaps_load_through_the_backend_and_failure_preserves_the_card() {
+    let mut explorer = explorer();
+    let mut parent = symbol("root");
+    parent.range.start.line = 3;
+    parent.range.end.line = 3;
+    parent.selection_range.start.line = 3;
+    parent.selection_range.end.line = 3;
+    let root = explorer.add_symbol(parent, Point::default()).unwrap();
+    explorer.session.cards[0]
+        .source
+        .context
+        .push(refscape_model::SourceContext {
+            start_line: 0,
+            code: "impl Project {".into(),
+        });
+    let before = explorer.session.clone();
+    explorer.language.fail = true;
+    assert!(explorer.expand_context(&root, 0).is_err());
+    assert_eq!(explorer.session, before);
+    explorer.language.fail = false;
+    explorer.language.code = "impl Project {\n    fn first() {}\n\n    fn target() {}\n}".into();
+    explorer.expand_context(&root, 0).unwrap();
+    assert!(
+        explorer.session.cards[0].source.context[0]
+            .code
+            .contains("    fn first() {}")
+    );
+    assert_eq!(
+        explorer.session.cards[0]
+            .source
+            .display_row(Position::new(3, 4)),
+        Some(3)
+    );
+}
+
+#[test]
+fn expanding_an_earlier_line_reorders_siblings_and_their_descendants() {
+    for references in [false, true] {
+        let mut explorer = explorer();
+        explorer.language.code = std::iter::repeat_n("    call();", 30)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut parent = symbol("parent");
+        parent.range.end = Position::new(30, 0);
+        let root = explorer
+            .add_symbol(parent, Point::new(100.0, 80.0))
+            .unwrap();
+        explorer.language.code = "fn target() {}".into();
+        let later = if references {
+            explorer.expand_references(&root, Position::new(19, 4))
+        } else {
+            explorer.expand_definition(&root, Position::new(19, 4))
+        }
+        .unwrap()
+        .remove(0);
+        explorer.language.target = symbol("grandchild");
+        let grandchild = explorer
+            .expand_definition(&later, Position::new(0, 4))
+            .unwrap()
+            .remove(0);
+        explorer.language.target = symbol("earlier");
+        let earlier = if references {
+            explorer.expand_references(&root, Position::new(18, 4))
+        } else {
+            explorer.expand_definition(&root, Position::new(18, 4))
+        }
+        .unwrap()
+        .remove(0);
+        let card = |id: &str| {
+            explorer
+                .session
+                .cards
+                .iter()
+                .find(|card| card.id == id)
+                .unwrap()
+        };
+        assert_eq!(card(&root).position, Point::new(100.0, 80.0));
+        assert_eq!(
+            card(&earlier).position.y,
+            source_anchor_y(card(&root), Position::new(18, 4))
+        );
+        assert!(
+            card(&earlier).position.y + card(&earlier).display_height() + CARD_GAP
+                <= card(&later).position.y
+        );
+        assert_eq!(
+            card(&grandchild).position.y,
+            source_anchor_y(card(&later), Position::new(0, 4))
+        );
+        assert_eq!(card(&earlier).position.x, card(&later).position.x);
+        explorer.remove_card(&earlier).unwrap();
+        let later = explorer
+            .session
+            .cards
+            .iter()
+            .find(|card| card.id == later)
+            .unwrap();
+        let root = explorer
+            .session
+            .cards
+            .iter()
+            .find(|card| card.id == root)
+            .unwrap();
+        assert_eq!(
+            later.position.y,
+            source_anchor_y(root, Position::new(19, 4))
+        );
+        explorer.session.validate().unwrap();
+    }
+}
+
+#[test]
 fn expansion_and_compaction_anchor_children_to_the_absolute_source_row() {
     for references in [false, true] {
         let mut explorer = explorer();
@@ -132,6 +385,10 @@ fn hiding_cards_packs_rows_and_columns_without_changing_the_viewport() {
         .collect::<Vec<_>>()
         .join("\n");
     let height = CodeCard::source_height(&SourceDocument {
+        expanded: Vec::new(),
+        folded: Vec::new(),
+        context: Vec::new(),
+        code_start: None,
         symbol: symbol("root"),
         code: explorer.language.code.clone(),
         tokens: vec![],

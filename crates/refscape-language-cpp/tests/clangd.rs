@@ -88,6 +88,174 @@ fn eventually(mut check: impl FnMut() -> bool) {
 }
 
 #[test]
+#[ignore = "requires clangd"]
+fn cpp_method_and_function_cards_preserve_namespace_class_and_struct_context() {
+    let fixture = Fixture::new();
+    let text = "namespace outer {\n    namespace inner {\n        class Project {\n        public:\n            int first() const { return 1; }\n\n            int options() const {\n                return 42;\n            }\n        };\n        struct Settings {\n            int value() const { return 7; }\n        };\n\n        int helper() { return 3; }\n    }\n}\nint main() {\n    outer::inner::Project project;\n    int earlier = project.first();\n    return project.options() + earlier;\n}\n";
+    let path = fixture.write("source/main.cpp", text);
+    let database = fixture.database(std::slice::from_ref(&path), "clang++", &["-std=c++17"]);
+    let mut language = Clangd::default().with_timeout(Duration::from_secs(30));
+    language
+        .open_project(
+            &fixture.0.join("source"),
+            &ProjectOptions {
+                language: ProjectLanguage::Cpp,
+                compilation_database: Some(database),
+            },
+        )
+        .unwrap();
+    fn find<'a>(symbols: &'a [Symbol], name: &str) -> Option<&'a Symbol> {
+        symbols.iter().find_map(|symbol| {
+            if symbol.name == name {
+                Some(symbol)
+            } else {
+                find(&symbol.children, name)
+            }
+        })
+    }
+    let symbols = language.symbols(&path).unwrap();
+    for (name, declaration_line, body_line) in [
+        ("options", Some(2), 6),
+        ("value", Some(10), 11),
+        ("helper", None, 14),
+    ] {
+        let symbol = find(&symbols, name).unwrap_or_else(|| panic!("missing {name}: {symbols:?}"));
+        let source = language.source(symbol).unwrap();
+        let expected: Vec<_> = [Some(0), Some(1), declaration_line]
+            .into_iter()
+            .flatten()
+            .map(|line| refscape_model::SourceContext {
+                start_line: line,
+                code: text.lines().nth(line as usize).unwrap().into(),
+            })
+            .collect();
+        assert_eq!(source.context, expected, "{name}");
+        assert_eq!(
+            source.code_start,
+            Some(Position::new(body_line, 0)),
+            "{name}"
+        );
+        assert_eq!(
+            source.code.lines().next(),
+            text.lines().nth(body_line as usize),
+            "{name}"
+        );
+        let row = source.display_row(Position::new(body_line, 16)).unwrap();
+        assert_eq!(
+            source.display_lines()[row].position,
+            Some(Position::new(body_line, 0))
+        );
+        source.validate().unwrap();
+    }
+    let definitions = language
+        .definitions(&path, at(text, 20, "options"))
+        .unwrap();
+    assert!(
+        definitions.iter().any(|symbol| symbol.name == "options"),
+        "{definitions:?}"
+    );
+    let source = language
+        .source(
+            definitions
+                .iter()
+                .find(|symbol| symbol.name == "options")
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(source.context.len(), 3);
+    let main = language.source(find(&symbols, "main").unwrap()).unwrap();
+    assert!(main.context.is_empty());
+
+    // Actual C++ expansions use the same source-order placement as every other language.
+    struct NoSession;
+    impl refscape_application::ports::SessionRepository for NoSession {
+        fn save(&self, _: &std::path::Path, _: &refscape_model::Session) -> Result<(), String> {
+            unreachable!()
+        }
+        fn load(&self, _: &std::path::Path) -> Result<refscape_model::Session, String> {
+            unreachable!()
+        }
+    }
+    let options = language.project_options();
+    let mut explorer = refscape_application::explorer::Explorer::new(language, NoSession);
+    explorer
+        .open_project(&fixture.0.join("source"), &options)
+        .unwrap();
+    let root = explorer
+        .add_symbol(
+            find(&symbols, "main").unwrap().clone(),
+            refscape_model::Point::default(),
+        )
+        .unwrap();
+    let later = explorer
+        .expand_definition(&root, at(text, 20, "options"))
+        .unwrap()
+        .remove(0);
+    let earlier = explorer
+        .expand_definition(&root, at(text, 19, "first"))
+        .unwrap()
+        .remove(0);
+    let cards = &explorer.session().cards;
+    let later = cards.iter().find(|card| card.id == later).unwrap();
+    let earlier = cards.iter().find(|card| card.id == earlier).unwrap();
+    assert_eq!(earlier.position.x, later.position.x);
+    assert!(earlier.position.y + earlier.display_height() < later.position.y);
+    assert_eq!(earlier.source.context.len(), 3);
+    assert_eq!(later.source.context.len(), 3);
+    let later_id = later.id.clone();
+    let target = explorer
+        .expand_definition(&later_id, at(text, 2, "Project"))
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        explorer
+            .session()
+            .cards
+            .iter()
+            .find(|card| card.id == target)
+            .unwrap()
+            .source
+            .symbol
+            .name,
+        "Project"
+    );
+    explorer.expand_context(&later_id, 2).unwrap();
+    let card = explorer
+        .session()
+        .cards
+        .iter()
+        .find(|card| card.id == later_id)
+        .unwrap();
+    assert!(card.source.context[2].code.contains("int first()"));
+    assert!(card.source.contains_display_position(at(text, 4, "first")));
+    assert_eq!(card.source.display_row(at(text, 6, "options")), Some(6));
+    let expanded = card.source.clone();
+    explorer.collapse_context(&later_id, 2).unwrap();
+    let folded = &explorer
+        .session()
+        .cards
+        .iter()
+        .find(|card| card.id == later_id)
+        .unwrap()
+        .source;
+    assert_eq!(folded.context[2].code, "        class Project {");
+    assert!(!folded.contains_display_position(at(text, 4, "first")));
+    assert!(folded.expanded.is_empty());
+    explorer.expand_context(&later_id, 2).unwrap();
+    assert_eq!(
+        explorer
+            .session()
+            .cards
+            .iter()
+            .find(|card| card.id == later_id)
+            .unwrap()
+            .source,
+        expanded
+    );
+    explorer.session().validate().unwrap();
+}
+
+#[test]
 #[ignore = "requires clangd; run cargo test -p refscape-language-cpp --test clangd -- --ignored"]
 fn cpp_headers_navigation_tokens_and_failed_project_switches() {
     let fixture = Fixture::new();

@@ -15,10 +15,7 @@ pub fn source_anchor_y(card: &CodeCard, position: Position) -> f32 {
     card.position.y
         + CODE_CARD_HEADER
         + 8.0
-        + position
-            .line
-            .saturating_sub(card.source.symbol.range.start.line) as f32
-            * CODE_LINE_HEIGHT
+        + card.source.display_anchor_row(position).unwrap_or(0) as f32 * CODE_LINE_HEIGHT
 }
 
 #[derive(Clone, Copy)]
@@ -64,10 +61,11 @@ impl CardRect {
 pub fn source_dimensions(source: &SourceDocument) -> (f32, f32) {
     // This estimates display space only; source structure remains language-server supplied.
     let longest = source
-        .code
-        .lines()
+        .display_lines()
+        .iter()
         .map(|line| {
-            line.chars()
+            line.text
+                .chars()
                 .map(|character| {
                     if character == '\t' {
                         4
@@ -81,7 +79,7 @@ pub fn source_dimensions(source: &SourceDocument) -> (f32, f32) {
         })
         .max()
         .unwrap_or(0);
-    let width = (longest as f32 * 8.0 + 80.0).max(520.0);
+    let width = (longest as f32 * 8.0 + source.code_gutter_width() + 20.0).max(520.0);
     let height = CodeCard::source_height(source);
     (width, height)
 }
@@ -112,6 +110,41 @@ pub fn compact_cards(
     anchor: Point,
     connections: &[Connection],
 ) -> Result<()> {
+    place_columns(cards, Some(anchor), connections)
+}
+
+/// Reflow connected columns in source order while retaining roots and horizontal positions.
+pub fn arrange_connected_cards(cards: &mut [CodeCard], connections: &[Connection]) -> Result<()> {
+    place_columns(cards, None, connections)
+}
+
+fn linked_anchor(
+    index: usize,
+    cards: &[CodeCard],
+    connections: &[Connection],
+    placements: &[(usize, CardRect)],
+) -> Option<(f32, Position)> {
+    connections
+        .iter()
+        .filter(|edge| edge.to == cards[index].id)
+        .filter_map(|edge| {
+            let (parent_index, rect) = placements
+                .iter()
+                .find(|(parent_index, _)| cards[*parent_index].id == edge.from)?;
+            Some((
+                source_anchor_y(&cards[*parent_index], edge.source) + rect.position.y
+                    - cards[*parent_index].position.y,
+                edge.source,
+            ))
+        })
+        .min_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)))
+}
+
+fn place_columns(
+    cards: &mut [CodeCard],
+    anchor: Option<Point>,
+    connections: &[Connection],
+) -> Result<()> {
     let mut order: Vec<_> = (0..cards.len()).collect();
     for card in cards.iter() {
         CardRect::from(card).validate()?;
@@ -140,43 +173,36 @@ pub fn compact_cards(
             .push(index);
     }
     let mut placements: Vec<(usize, CardRect)> = Vec::with_capacity(cards.len());
-    let mut x = anchor.x;
+    let mut x = anchor.map_or(0.0, |anchor| anchor.x);
     for mut column in columns {
         column.sort_by(|&left, &right| {
-            cards[left]
-                .position
-                .y
-                .total_cmp(&cards[right].position.y)
+            let left_anchor = linked_anchor(left, cards, connections, &placements);
+            let right_anchor = linked_anchor(right, cards, connections, &placements);
+            left_anchor
+                .map_or(cards[left].position.y, |a| a.0)
+                .total_cmp(&right_anchor.map_or(cards[right].position.y, |a| a.0))
+                .then(left_anchor.map(|a| a.1).cmp(&right_anchor.map(|a| a.1)))
+                .then(cards[left].position.y.total_cmp(&cards[right].position.y))
                 .then(cards[left].id.cmp(&cards[right].id))
         });
-        let mut y = anchor.y;
+        let mut y = anchor.map_or(f32::NEG_INFINITY, |anchor| anchor.y);
         let mut width: f32 = 0.0;
         for index in column {
             let card = &cards[index];
-            let linked_y = connections
-                .iter()
-                .filter(|edge| edge.to == card.id)
-                .filter_map(|edge| {
-                    let (parent_index, rect) = placements
-                        .iter()
-                        .find(|(parent_index, _)| cards[*parent_index].id == edge.from)?;
-                    Some(
-                        source_anchor_y(&cards[*parent_index], edge.source) + rect.position.y
-                            - cards[*parent_index].position.y,
-                    )
-                })
-                .reduce(f32::min);
-            if let Some(linked_y) = linked_y {
+            if let Some((linked_y, _)) = linked_anchor(index, cards, connections, &placements) {
                 y = y.max(linked_y);
+            } else if anchor.is_none() {
+                y = y.max(card.position.y);
             }
-            let rect = CardRect {
-                position: Point::new(x, y),
-                width: card.width,
-                height: card.display_height(),
-            };
-            rect.validate()?;
+            let occupied: Vec<_> = placements.iter().map(|(_, rect)| *rect).collect();
+            let rect = vacant_position(
+                Point::new(anchor.map_or(card.position.x, |_| x), y),
+                card.width,
+                card.display_height(),
+                &occupied,
+            )?;
             width = width.max(rect.width);
-            y += rect.height + CARD_GAP;
+            y = rect.position.y + rect.height + CARD_GAP;
             placements.push((index, rect));
         }
         x += width + CARD_COLUMN_GAP;

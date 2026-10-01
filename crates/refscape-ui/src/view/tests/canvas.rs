@@ -1,4 +1,308 @@
 use super::*;
+
+fn assert_code_columns(card: &PaintedCard, zoom: f32) {
+    for row in &card.rows {
+        if let Some(number) = &row.number {
+            let right = number.origin.x + number.line.x_for_index(number.line.text.len());
+            assert!((f32::from(right - (card.origin.x - px(12.0 * zoom)))).abs() < 0.01);
+            assert!(number.origin.x >= card.bounds.left() + px(24.0 * zoom));
+        }
+    }
+}
+
+#[gpui::test]
+fn folded_context_keeps_clicks_and_connections_on_the_original_source_row(cx: &mut TestAppContext) {
+    let (explorer, requests) = fixture();
+    let mut session = explorer.session().clone();
+    session.cards[0]
+        .source
+        .context
+        .push(refscape_model::SourceContext {
+            start_line: 0,
+            code: "impl Sample {".into(),
+        });
+    let source_id = session.cards[0].id.clone();
+    let mut target = session.cards[0].clone();
+    target.id = "target".into();
+    target.position = Point::new(800.0, 100.0);
+    session.cards.push(target);
+    session.connections.push(refscape_model::Connection {
+        id: "edge".into(),
+        from: source_id,
+        to: "target".into(),
+        kind: ConnectionKind::Definition,
+        source: Position::new(12, 9),
+    });
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        ExplorerView::new(
+            explorer,
+            "session.json".into(),
+            vec![],
+            None,
+            ProjectOptions::default(),
+            window,
+            cx,
+        )
+    });
+    view.update(cx, |view, cx| {
+        view.session = session.clone();
+        cx.notify();
+    });
+    let handle = cx.window_handle();
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let (bounds, origin, x, y) = view.read_with(cx, |view, _| {
+        let painted = &view.canvas.painted[0];
+        assert_eq!(
+            painted
+                .rows
+                .iter()
+                .map(|row| row.position)
+                .collect::<Vec<_>>(),
+            vec![Some(Position::new(0, 0)), None, Some(Position::new(12, 5))]
+        );
+        assert_eq!(painted.rows[0].code.text.as_ref(), "impl Sample {");
+        assert_eq!(
+            painted.rows[1].code.text.as_ref(),
+            "    ... (Show 11 Lines)"
+        );
+        (
+            view.canvas.bounds,
+            painted.origin,
+            painted.origin.x + painted.rows[2].code.x_for_index("日本😀".len()) + px(1.0),
+            painted.origin.y + px(2.0 * LINE + 5.0),
+        )
+    });
+    cx.update_window(handle, |_, window, _| {
+        let links = code_connections(&session, bounds, window);
+        assert_eq!(links.len(), 1);
+        assert!(links[0].start.y > origin.y + px(2.0 * LINE));
+        assert!(links[0].start.y < origin.y + px(3.0 * LINE));
+    })
+    .unwrap();
+    // The synthetic destination above is only needed to verify painted connection geometry.
+    view.update(cx, |view, cx| {
+        view.session.cards.retain(|card| card.id != "target");
+        view.session.connections.clear();
+        cx.notify();
+    });
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    cx.simulate_mouse_down(
+        point(x, origin.y + px(LINE + 5.0)),
+        MouseButton::Right,
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert!(requests.lock().unwrap().is_empty());
+    cx.simulate_mouse_down(point(x, y), MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert!(!view.requests.error, "{}", view.requests.status)
+    });
+    assert_eq!(*requests.lock().unwrap(), vec![Position::new(12, 9)]);
+}
+
+#[gpui::test]
+fn context_symbols_and_revealed_lines_are_clickable_at_absolute_utf16_positions(
+    cx: &mut TestAppContext,
+) {
+    let range = SourceRange {
+        start: Position::new(12, 5),
+        end: Position::new(12, 13),
+    };
+    let source = SourceDocument {
+        expanded: Vec::new(),
+        symbol: Symbol::file("sample.rs".into(), range),
+        code: "日本😀call".into(),
+        tokens: vec![],
+        code_start: None,
+        context: vec![refscape_model::SourceContext {
+            start_line: 9,
+            code: "impl 日本😀Sample {".into(),
+        }],
+        folded: vec![refscape_model::SourceContext {
+            start_line: 10,
+            code: "    call();\n\n".into(),
+        }],
+    };
+    let mut target = Symbol::file("target.rs".into(), range);
+    target.name = "Sample".into();
+    let (explorer, requests) = source_fixture(source, vec![target]);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        ExplorerView::new(
+            explorer,
+            "session.json".into(),
+            vec![],
+            None,
+            ProjectOptions::default(),
+            window,
+            cx,
+        )
+    });
+    let handle = cx.window_handle();
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let click = view.read_with(cx, |view, _| {
+        let card = &view.canvas.painted[0];
+        assert_code_columns(card, view.session.viewport.zoom);
+        assert_eq!(card.rows[1].code.text.as_ref(), "    ... (Show 2 Lines)");
+        point(
+            card.origin.x + card.rows[0].code.x_for_index("impl 日本😀".len()) + px(1.0),
+            card.origin.y + px(5.0),
+        )
+    });
+    cx.simulate_mouse_move(click, None, Modifiers::default());
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+    assert_eq!(*requests.lock().unwrap(), vec![Position::new(9, 9)]);
+    requests.lock().unwrap().clear();
+    cx.simulate_mouse_down(click, MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(*requests.lock().unwrap(), vec![Position::new(9, 9)]);
+    view.read_with(cx, |view, _| {
+        assert!(!view.requests.error, "{}", view.requests.status);
+        assert_eq!(view.session.cards.len(), 2);
+        assert_eq!(view.session.connections[0].source, Position::new(9, 9));
+    });
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let (session, bounds, origin) = view.read_with(cx, |view, _| {
+        (
+            view.session.clone(),
+            view.canvas.bounds,
+            view.canvas.painted[0].origin,
+        )
+    });
+    cx.update_window(handle, |_, window, _| {
+        let links = code_connections(&session, bounds, window);
+        assert_eq!(links.len(), 1);
+        assert!(links[0].start.y > origin.y && links[0].start.y < origin.y + px(LINE));
+    })
+    .unwrap();
+    let fold = view.read_with(cx, |view, _| {
+        let card = &view.canvas.painted[0];
+        point(card.origin.x + px(5.0), card.origin.y + px(LINE + 5.0))
+    });
+    cx.simulate_mouse_down(fold, MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert!(!view.requests.error, "{}", view.requests.status);
+        let card = &view.session.cards[0];
+        assert!(card.source.folded.is_empty());
+        assert_eq!(card.source.display_row(Position::new(12, 9)), Some(3));
+        assert_eq!(card.source.display_lines()[1].text, "    call();");
+        assert_eq!(card.source.display_lines()[2].text, "");
+        assert_eq!(
+            view.session.cards,
+            view.explorer.lock().unwrap().session().cards
+        );
+    });
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let click = view.read_with(cx, |view, _| {
+        let card = &view.canvas.painted[0];
+        assert_code_columns(card, view.session.viewport.zoom);
+        point(
+            card.origin.x + card.rows[1].code.x_for_index(4) + px(1.0),
+            card.origin.y + px(LINE + 5.0),
+        )
+    });
+    cx.simulate_mouse_down(click, MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        *requests.lock().unwrap(),
+        vec![Position::new(9, 9), Position::new(10, 4)]
+    );
+    for zoom in [0.75, 1.5] {
+        view.update(cx, |view, cx| {
+            view.session.viewport.zoom = zoom;
+            cx.notify();
+        });
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        let number_click = view.read_with(cx, |view, _| {
+            let card = &view.canvas.painted[0];
+            assert_code_columns(card, zoom);
+            point(
+                card.rows[1].number.as_ref().unwrap().origin.x + px(1.0),
+                card.origin.y + px((LINE + 5.0) * zoom),
+            )
+        });
+        cx.simulate_mouse_move(number_click, None, Modifiers::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.canvas.context_hover.is_none()));
+        cx.simulate_mouse_down(number_click, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.session.cards[0].source.expanded.len(), 1)
+        });
+        let collapse = view.read_with(cx, |view, _| {
+            let card = &view.canvas.painted[0];
+            assert_eq!(card.rows[1].fold, Some(0));
+            point(
+                card.bounds.left() + px(10.0 * zoom),
+                card.origin.y + px((LINE + 5.0) * zoom),
+            )
+        });
+        cx.simulate_mouse_move(collapse, None, Modifiers::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.canvas.context_hover.is_some()));
+        cx.simulate_mouse_down(collapse, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(!view.requests.error, "{}", view.requests.status);
+            assert!(view.session.cards[0].source.expanded.is_empty());
+            assert_eq!(
+                view.session.cards[0]
+                    .source
+                    .display_row(Position::new(12, 9)),
+                Some(2)
+            );
+        });
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        let (session, bounds, expand) = view.read_with(cx, |view, _| {
+            let card = &view.canvas.painted[0];
+            assert_code_columns(card, zoom);
+            assert_eq!(card.rows[1].code.text.as_ref(), "    ... (Show 2 Lines)");
+            (
+                view.session.clone(),
+                view.canvas.bounds,
+                point(
+                    card.bounds.left() + px(10.0 * zoom),
+                    card.origin.y + px((LINE + 5.0) * zoom),
+                ),
+            )
+        });
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(code_connections(&session, bounds, window).len(), 1)
+        })
+        .unwrap();
+        cx.simulate_mouse_down(expand, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(!view.requests.error, "{}", view.requests.status);
+            assert_eq!(view.session.cards[0].source.expanded.len(), 1);
+            assert_eq!(
+                view.session.cards[0]
+                    .source
+                    .display_row(Position::new(12, 9)),
+                Some(3)
+            );
+        });
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        let (session, bounds) =
+            view.read_with(cx, |view, _| (view.session.clone(), view.canvas.bounds));
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(code_connections(&session, bounds, window).len(), 2)
+        })
+        .unwrap();
+    }
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
 #[gpui::test]
 fn hiding_a_card_applies_the_new_layout_to_the_canvas_and_connection_anchors(
     cx: &mut TestAppContext,
@@ -36,7 +340,7 @@ fn hiding_a_card_applies_the_new_layout_to_the_canvas_and_connection_anchors(
     let click = view.read_with(cx, |view, _| {
         let source = &view.canvas.painted[0];
         point(
-            source.origin.x + source.lines[0].x_for_index("日本😀".len()) + px(1.0),
+            source.origin.x + source.rows[0].code.x_for_index("日本😀".len()) + px(1.0),
             source.origin.y + px(5.0),
         )
     });
@@ -155,8 +459,8 @@ fn definition_and_reference_edges_start_at_rendered_word_underlines(cx: &mut Tes
             let card = &view.canvas.painted[0];
             (
                 view.canvas.bounds,
-                card.origin.x + card.lines[0].x_for_index("日本😀".len()),
-                card.origin.x + card.lines[0].x_for_index("日本😀call".len()),
+                card.origin.x + card.rows[0].code.x_for_index("日本😀".len()),
+                card.origin.x + card.rows[0].code.x_for_index("日本😀call".len()),
             )
         });
         cx.update_window(handle, |_, window, _| {
@@ -252,7 +556,7 @@ fn dropping_tall_cards_clears_their_rendered_bottoms_at_every_zoom(cx: &mut Test
             }
             for painted in &view.canvas.painted {
                 let last_line_bottom =
-                    painted.origin.y + px(painted.lines.len() as f32 * LINE * zoom);
+                    painted.origin.y + px(painted.rows.len() as f32 * LINE * zoom);
                 assert!(painted.bounds.bottom() >= last_line_bottom + px(16.0 * zoom));
                 let card = view
                     .session

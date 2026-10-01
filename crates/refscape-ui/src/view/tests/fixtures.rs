@@ -79,10 +79,22 @@ pub(super) fn fixture_with_targets(
     };
     let symbol = Symbol::file(PathBuf::from("sample.rs"), range);
     let source = SourceDocument {
+        expanded: Vec::new(),
+        folded: Vec::new(),
+        context: Vec::new(),
+        code_start: None,
         symbol: symbol.clone(),
         code: "日本😀call".into(),
         tokens: vec![],
     };
+    source_fixture(source, targets)
+}
+
+pub(super) fn source_fixture(
+    source: SourceDocument,
+    targets: Vec<Symbol>,
+) -> (Explorer<Language, Repository>, Requests) {
+    let symbol = source.symbol.clone();
     let requests = Arc::new(Mutex::new(vec![]));
     let mut explorer = Explorer::new(
         Language {
@@ -116,6 +128,10 @@ pub(super) fn variable_fixture(
     let mut type_symbol = Symbol::file("type.rs".into(), range);
     type_symbol.name = "Config".into();
     let source = SourceDocument {
+        expanded: Vec::new(),
+        folded: Vec::new(),
+        context: Vec::new(),
+        code_start: None,
         symbol: symbol.clone(),
         code: "日本😀call call\n    call".into(),
         tokens: [(12, 9), (12, 14), (13, 4)]

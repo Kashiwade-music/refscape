@@ -125,12 +125,14 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                     .text_size(px(11.0)).child(description.lines().take(6).collect::<Vec<_>>().join("\n"))
             }));
         let inspection = self.canvas.inspection.clone();
+        let context_hover = self.canvas.context_hover.clone();
         let workspace = div()
             .id("canvas")
             .relative()
             .flex_1()
             .h_full()
             .overflow_hidden()
+            .when(context_hover.is_some(), |canvas| canvas.cursor_pointer())
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|v, e, _, cx| v.mouse_down(e, false, cx)),
@@ -150,6 +152,9 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
             .on_mouse_move(cx.listener(|v, e, _, cx| v.mouse_move(e, cx)))
             .on_hover(cx.listener(|v, hovered, _, cx| {
                 if !hovered {
+                    if v.canvas.context_hover.take().is_some() {
+                        cx.notify();
+                    }
                     v.dismiss_hover(cx);
                 }
             }))
@@ -178,7 +183,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                     move |bounds, _, window, cx| {
                         let painted = paint_canvas(
                             &session,
-                            selected.as_deref(),
+                            (selected.as_deref(), context_hover.as_ref()),
                             inspection.as_ref(),
                             bounds,
                             window,

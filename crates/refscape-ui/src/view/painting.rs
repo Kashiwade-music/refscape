@@ -1,16 +1,29 @@
 //! Canvas geometry and GPUI painting.
-use super::shaping::{card_title, code_runs, variable_highlight_spans};
+mod code;
+
+use super::shaping::card_title;
 use super::*;
+use code::paint_code;
 
 pub(super) struct PaintedCard {
     pub(super) id: String,
     pub(super) bounds: Bounds<Pixels>,
-    pub(super) lines: Vec<ShapedLine>,
-    pub(super) first_line: u32,
-    pub(super) first_character: u32,
+    pub(super) rows: Vec<PaintedRow>,
     pub(super) origin: gpui::Point<Pixels>,
 }
 
+/// A row keeps its source mapping and each painted column together.
+pub(super) struct PaintedRow {
+    pub(super) code: ShapedLine,
+    pub(super) position: Option<Position>,
+    pub(super) fold: Option<usize>,
+    pub(super) number: Option<PaintedNumber>,
+}
+
+pub(super) struct PaintedNumber {
+    pub(super) line: ShapedLine,
+    pub(super) origin: gpui::Point<Pixels>,
+}
 fn text(
     text: String,
     origin: gpui::Point<Pixels>,
@@ -62,12 +75,13 @@ pub(super) fn card_bounds(
 
 pub(super) fn paint_canvas(
     session: &Session,
-    selected: Option<&str>,
+    interaction: (Option<&str>, Option<&(String, usize)>),
     inspection: Option<&VariableInspection>,
     bounds: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) -> Vec<PaintedCard> {
+    let (selected, context_hover) = interaction;
     let palette = &session.theme.palette;
     let zoom = session.viewport.zoom;
     let step = (32.0 * zoom).max(12.0);
@@ -186,7 +200,7 @@ pub(super) fn paint_canvas(
             }),
             Default::default(),
         ));
-        let (origin, lines) =
+        let (origin, rows) =
             window.with_content_mask(Some(gpui::ContentMask { bounds: rect }), |window| {
                 text(
                     card_title(session, card),
@@ -218,81 +232,15 @@ pub(super) fn paint_canvas(
                     window,
                     cx,
                 );
-                let origin = point(
-                    rect.left() + px(54.0 * zoom),
-                    rect.top() + px((HEADER + 8.0) * zoom),
+                let (origin, rows) = paint_code(
+                    card,
+                    session,
+                    context_hover,
+                    inspection,
+                    (rect, bounds),
+                    window,
+                    cx,
                 );
-                let mut lines = vec![];
-                if zoom >= 0.65 {
-                    for (index, source) in card.source.code.lines().enumerate() {
-                        let y = origin.y + px(index as f32 * LINE * zoom);
-                        let runs = code_runs(
-                            source,
-                            card.source.symbol.range.start.line + index as u32,
-                            if index == 0 {
-                                card.source.symbol.range.start.character
-                            } else {
-                                0
-                            },
-                            &card.source.tokens,
-                            palette,
-                        );
-                        let line = window.text_system().shape_line(
-                            source.to_string().into(),
-                            px(12.0 * zoom),
-                            &runs,
-                            None,
-                        );
-                        if y + px(LINE * zoom) >= bounds.top() && y < bounds.bottom() {
-                            for span in variable_highlight_spans(card, index, inspection) {
-                                window.paint_quad(fill(
-                                    Bounds::new(
-                                        point(origin.x + line.x_for_index(span.start), y),
-                                        size(
-                                            line.x_for_index(span.end)
-                                                - line.x_for_index(span.start),
-                                            px(LINE * zoom),
-                                        ),
-                                    ),
-                                    color(&palette.accent).opacity(0.22),
-                                ));
-                            }
-                            text(
-                                format!(
-                                    "{}",
-                                    card.source.symbol.range.start.line + index as u32 + 1
-                                ),
-                                point(rect.left() + px(12.0 * zoom), y),
-                                10.0 * zoom,
-                                color(&palette.muted),
-                                window,
-                                cx,
-                            );
-                            let _ = line.paint(
-                                point(origin.x, y),
-                                px(LINE * zoom),
-                                TextAlign::Left,
-                                None,
-                                window,
-                                cx,
-                            );
-                        }
-                        lines.push(line);
-                    }
-                } else {
-                    text(
-                        format!(
-                            "{} · {} lines",
-                            card.source.symbol.kind,
-                            card.source.code.lines().count()
-                        ),
-                        origin,
-                        11.0,
-                        color(&palette.muted),
-                        window,
-                        cx,
-                    );
-                }
                 for connection in connections
                     .iter()
                     .filter(|connection| connection.source_card == card.id)
@@ -307,14 +255,12 @@ pub(super) fn paint_canvas(
                         window.paint_path(path, color(&palette.connection));
                     }
                 }
-                (origin, lines)
+                (origin, rows)
             });
         painted.push(PaintedCard {
             id: card.id.clone(),
             bounds: rect,
-            lines,
-            first_line: card.source.symbol.range.start.line,
-            first_character: card.source.symbol.range.start.character,
+            rows,
             origin,
         });
     }
