@@ -6,11 +6,11 @@ use std::{env, path::Path, process::Command};
 pub use architecture::{check_architecture, dependency_graph, write_dependency_graph};
 pub use source_rules::{MAX_FILE_LINES, check_source_rules};
 
-/// Validate source rules and architecture, then regenerate the graph and check both workspaces.
+/// Validate source rules, architecture and the checked-in graph, then check both workspaces.
 pub fn gate(root: &Path) -> Result<(), String> {
     println!("{}", check_source_rules(root)?);
     println!("{}", check_architecture(root)?);
-    println!("{}", write_dependency_graph(root)?);
+    check_dependency_graph(root)?;
 
     cargo(root, &["fmt", "--all", "--", "--check"])?;
     cargo(
@@ -92,4 +92,19 @@ fn cargo(root: &Path, args: &[&str]) -> Result<(), String> {
     } else {
         Err(format!("cargo {} failed ({status})", args.join(" ")))
     }
+}
+/// A normal gate checks generated documentation without modifying it.
+pub fn check_dependency_graph(root: &Path) -> Result<(), String> {
+    let expected = dependency_graph(root)?;
+    let path = root.join("docs/dependency-graph.md");
+    let actual = std::fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "cannot read {}: {error}; run cargo xtask graph",
+            path.display()
+        )
+    })?;
+    if actual.replace("\r\n", "\n") != expected {
+        return Err("dependency graph is outdated; run cargo xtask graph and review it".into());
+    }
+    Ok(())
 }

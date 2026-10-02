@@ -337,7 +337,7 @@ GPUIが使う描画バックエンドに対応したGPUドライバーが必要�
 
 ## 開発
 
-製品は12 crateのCargo workspaceで構成し、開発用の `xtask` は独立したworkspaceとする。
+製品は14 crateのCargo workspaceで構成し、開発用の `xtask` は独立したworkspaceとする。
 共通LSP処理とCanvas配置を独立させ、Rust、C/C++、TypeScript/JavaScript、Pythonの解析はそれぞれの言語crateが実装する。
 今後の言語も専用crateを追加し、選択層へ登録する。言語crate同士の依存と、全種類の内部依存の循環を禁止する。
 各crateの責務・依存方向・検査ルールは [アーキテクチャ](docs/architecture.md) を参照。
@@ -348,8 +348,11 @@ GPUIが使う描画バックエンドに対応したGPUドライバーが必要�
 Rust toolchainは `rust-toolchain.toml` に固定している。リポジトリのルートで次を実行する。
 
 ```sh
-# 構造検査、依存グラフの自動生成・更新、format、clippy、test
+# 構造検査、生成依存図のcheck、format、clippy、test
 cargo xtask gate
+
+# manifest変更後の依存図更新
+cargo xtask graph
 
 # 起動
 cargo run --locked
@@ -380,7 +383,7 @@ cargo test -p refscape-language --locked --test backends -- --ignored
 cargo run --locked -- --check "C:\code\my-project"
 ```
 
-`cargo xtask gate` が構造検査に成功すると、`docs/dependency-graph.md` を自動生成・更新する。
+`cargo xtask graph` が `docs/dependency-graph.md` を更新し、`cargo xtask gate` はその一致を検査する。
 実サーバーのテストは外部の `rust-analyzer` / `clangd` / `typescript-language-server` / `basedpyright-langserver` が必要なため通常はignoreされる。
 
 実GPUによる描画確認用のexampleも用意する。`main` を持つプロジェクトで、
