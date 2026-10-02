@@ -11,6 +11,7 @@ refscape-model.workspace = true
 refscape-language-rust.workspace = true
 refscape-language-cpp.workspace = true
 refscape-language-typescript.workspace = true
+refscape-language-python.workspace = true
 
 [lints]
 workspace = true

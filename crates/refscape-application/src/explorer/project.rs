@@ -68,11 +68,11 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
         session.project_root = saved_root;
         if matches!(
             overrides.language,
-            ProjectLanguage::Rust | ProjectLanguage::TypeScript
+            ProjectLanguage::Rust | ProjectLanguage::TypeScript | ProjectLanguage::Python
         ) && overrides.compilation_database.is_some()
         {
             return Err(
-                "A compilation database cannot be used with the Rust or TypeScript backend".into(),
+                "A compilation database cannot be used with the Rust, TypeScript, or Python backend".into(),
             );
         }
         if overrides.language != ProjectLanguage::Auto {
@@ -80,7 +80,7 @@ impl<L: LanguageService, R: SessionRepository> Explorer<L, R> {
         }
         if matches!(
             overrides.language,
-            ProjectLanguage::Rust | ProjectLanguage::TypeScript
+            ProjectLanguage::Rust | ProjectLanguage::TypeScript | ProjectLanguage::Python
         ) {
             session.project_options.compilation_database = None;
         } else if let Some(database) = &overrides.compilation_database {

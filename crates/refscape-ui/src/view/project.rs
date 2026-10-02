@@ -102,7 +102,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Open Rust, C/C++, or TypeScript/React source folder".into()),
+            prompt: Some("Open Rust, C/C++, TypeScript/React, or Python source folder".into()),
         });
         cx.spawn(async move |view, cx| match picker.await {
             Ok(Ok(Some(paths))) => {

@@ -17,6 +17,7 @@ flowchart TD
         refscape_canvas["refscape-canvas"]
         refscape_language["refscape-language"]
         refscape_language_cpp["refscape-language-cpp"]
+        refscape_language_python["refscape-language-python"]
         refscape_language_rust["refscape-language-rust"]
         refscape_language_typescript["refscape-language-typescript"]
         refscape_lsp["refscape-lsp"]
@@ -33,12 +34,16 @@ flowchart TD
         refscape_canvas -->|"normal"| refscape_model
         refscape_language -->|"normal"| refscape_application
         refscape_language -->|"normal"| refscape_language_cpp
+        refscape_language -->|"normal"| refscape_language_python
         refscape_language -->|"normal"| refscape_language_rust
         refscape_language -->|"normal"| refscape_language_typescript
         refscape_language -->|"normal"| refscape_model
         refscape_language_cpp -->|"normal"| refscape_application
         refscape_language_cpp -->|"normal"| refscape_lsp
         refscape_language_cpp -->|"normal"| refscape_model
+        refscape_language_python -->|"normal"| refscape_application
+        refscape_language_python -->|"normal"| refscape_lsp
+        refscape_language_python -->|"normal"| refscape_model
         refscape_language_rust -->|"normal"| refscape_application
         refscape_language_rust -->|"normal"| refscape_lsp
         refscape_language_rust -->|"normal"| refscape_model
@@ -72,6 +77,7 @@ flowchart LR
         refscape_canvas["refscape-canvas"]
         refscape_language["refscape-language"]
         refscape_language_cpp["refscape-language-cpp"]
+        refscape_language_python["refscape-language-python"]
         refscape_language_rust["refscape-language-rust"]
         refscape_language_typescript["refscape-language-typescript"]
         refscape_lsp["refscape-lsp"]
@@ -91,6 +97,7 @@ flowchart LR
         external_5["toml"]
     end
     refscape_language_cpp -->|"normal, workspace"| external_4
+    refscape_language_python -->|"normal, workspace"| external_4
     refscape_language_rust -->|"normal, workspace"| external_3
     refscape_language_rust -->|"normal, workspace"| external_4
     refscape_language_typescript -->|"normal, workspace"| external_4

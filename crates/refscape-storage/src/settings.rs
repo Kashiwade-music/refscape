@@ -24,6 +24,9 @@ pub struct Settings {
     /// Overrides the TypeScript language server executable or Node entry point.
     #[serde(default)]
     pub typescript_language_server_path: Option<PathBuf>,
+    /// Overrides the Pyright language server executable or Node entry point.
+    #[serde(default)]
+    pub pyright_path: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -35,6 +38,7 @@ impl Default for Settings {
             rust_analyzer_path: None,
             clangd_path: None,
             typescript_language_server_path: None,
+            pyright_path: None,
         }
     }
 }

@@ -1,4 +1,15 @@
 use super::*;
+
+#[test]
+fn python_project_settings_display_the_backend() {
+    assert_eq!(
+        project_settings_label(&ProjectOptions {
+            language: ProjectLanguage::Python,
+            compilation_database: None,
+        }),
+        "Python · basedpyright"
+    );
+}
 type ProjectRequests = Arc<Mutex<Vec<(PathBuf, ProjectOptions)>>>;
 
 struct ProjectLanguageFixture {

@@ -135,6 +135,105 @@ fn failed_typescript_start_preserves_previous_project() {
     assert_eq!(router.files().unwrap(), [PathBuf::from("active.rs")]);
 }
 
+#[test]
+fn python_detection_follows_rust_and_typescript_and_precedes_cpp() {
+    let fixture = Fixture::new();
+    fixture.write("native.cpp");
+    fixture.write("main.py");
+    assert_eq!(
+        select_language(&fixture.0, &ProjectOptions::default()).unwrap(),
+        ProjectLanguage::Python
+    );
+    let explicit = ProjectOptions {
+        language: ProjectLanguage::Python,
+        compilation_database: None,
+    };
+    let database = ProjectOptions {
+        compilation_database: Some("build".into()),
+        ..ProjectOptions::default()
+    };
+    assert_eq!(
+        select_language(&fixture.0, &database).unwrap(),
+        ProjectLanguage::Cpp
+    );
+    assert!(
+        select_language(
+            &fixture.0,
+            &ProjectOptions {
+                language: ProjectLanguage::Python,
+                ..database
+            }
+        )
+        .is_err()
+    );
+    fixture.write("App.tsx");
+    assert_eq!(
+        select_language(&fixture.0, &ProjectOptions::default()).unwrap(),
+        ProjectLanguage::TypeScript
+    );
+    fixture.write("Cargo.toml");
+    assert_eq!(
+        select_language(&fixture.0, &ProjectOptions::default()).unwrap(),
+        ProjectLanguage::Rust
+    );
+    assert_eq!(
+        select_language(&fixture.0, &explicit).unwrap(),
+        ProjectLanguage::Python
+    );
+}
+
+#[test]
+fn python_detection_ignores_javascript_bundled_in_virtual_environments() {
+    let fixture = Fixture::new();
+    fixture.write("main.py");
+    for directory in [
+        ".venv/Lib/site-packages/pkg/static",
+        "custom-env/Lib/package/static",
+    ] {
+        fs::create_dir_all(fixture.0.join(directory)).unwrap();
+        fixture.write(&format!("{directory}/client.js"));
+    }
+    fixture.write("custom-env/pyvenv.cfg");
+    assert_eq!(
+        select_language(&fixture.0, &ProjectOptions::default()).unwrap(),
+        ProjectLanguage::Python
+    );
+    fixture.write("main.ts");
+    assert_eq!(
+        select_language(&fixture.0, &ProjectOptions::default()).unwrap(),
+        ProjectLanguage::TypeScript
+    );
+}
+
+#[test]
+fn failed_python_start_preserves_previous_project_and_honors_server_override() {
+    let fixture = Fixture::new();
+    fixture.write("main.py");
+    let mut router =
+        LanguageBackend::default().with_pyright_server(fixture.0.join("no-python-server"));
+    router.active = Some(Box::new(ActiveRust));
+    let error = router
+        .open_project(&fixture.0, &ProjectOptions::default())
+        .unwrap_err();
+    assert!(error.contains("REFSCAPE_PYRIGHT"), "{error}");
+    assert_eq!(router.project_options().language, ProjectLanguage::Rust);
+    assert_eq!(router.files().unwrap(), [PathBuf::from("active.rs")]);
+}
+
+#[test]
+fn unavailable_python_server_leaves_router_without_an_active_project() {
+    let fixture = Fixture::new();
+    fixture.write("main.py");
+    let mut router =
+        LanguageBackend::default().with_pyright_server(fixture.0.join("no-python-server"));
+    let error = router
+        .open_project(&fixture.0, &ProjectOptions::default())
+        .unwrap_err();
+    assert!(error.contains("REFSCAPE_PYRIGHT"), "{error}");
+    assert_eq!(router.project_options(), ProjectOptions::default());
+    assert!(router.files().unwrap_err().contains("open a project"));
+}
+
 struct ActiveRust;
 impl LanguageService for ActiveRust {
     fn open_project(&mut self, _: &Path, _: &ProjectOptions) -> Result<(), String> {

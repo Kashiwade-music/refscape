@@ -18,6 +18,7 @@ pub enum ProjectLanguage {
     Cpp,
     #[serde(rename = "typescript")]
     TypeScript,
+    Python,
 }
 
 /// Analysis settings are independent of the source root and travel with sessions.

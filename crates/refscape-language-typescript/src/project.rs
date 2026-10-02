@@ -49,8 +49,22 @@ pub(crate) fn files(root: &Path) -> Result<Vec<PathBuf>, String> {
                             | "coverage"
                             | "Pods"
                             | ".gradle"
+                            | ".venv"
+                            | "venv"
+                            | ".env"
+                            | "env"
+                            | "__pypackages__"
+                            | "site-packages"
+                            | "__pycache__"
+                            | ".pytest_cache"
+                            | ".mypy_cache"
+                            | ".ruff_cache"
+                            | ".pytype"
+                            | ".tox"
+                            | ".nox"
                     )
-                ) {
+                ) && !path.join("pyvenv.cfg").is_file()
+                {
                     collect(&path, output)?;
                 }
             } else if matches!(

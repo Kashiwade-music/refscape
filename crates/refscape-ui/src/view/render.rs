@@ -307,6 +307,7 @@ pub(super) fn project_settings_label(options: &ProjectOptions) -> String {
         ProjectLanguage::Auto => "Language: automatic".into(),
         ProjectLanguage::Rust => "Rust · rust-analyzer".into(),
         ProjectLanguage::TypeScript => "TypeScript / JavaScript / React · tsserver".into(),
+        ProjectLanguage::Python => "Python · basedpyright".into(),
         ProjectLanguage::Cpp => match &options.compilation_database {
             Some(path) => format!("C/C++ · clangd\nBuild settings: {}", display_path(path)),
             None => "C/C++ · clangd · project/default flags\nReferences and symbol search may be incomplete. Select Build settings to load compile_commands.json.".into(),

@@ -68,3 +68,53 @@ fn discovery_includes_jsx_module_extensions_and_native_variants_but_skips_depend
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn python_environments_and_caches_do_not_identify_a_typescript_project() {
+    let root = std::env::temp_dir().join(format!(
+        "refscape-ts-python-environments-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("main.py"), "def main(): pass\n").unwrap();
+    for directory in [
+        ".venv/Lib/site-packages/pkg/static",
+        "venv",
+        ".env",
+        "env",
+        "__pypackages__",
+        "site-packages",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytype",
+        ".tox",
+        ".nox",
+    ] {
+        fs::create_dir_all(root.join(directory)).unwrap();
+        fs::write(root.join(directory).join("client.js"), "").unwrap();
+    }
+    fs::create_dir_all(root.join("custom-env/Lib/package/static")).unwrap();
+    fs::write(root.join("custom-env/pyvenv.cfg"), "home = python\n").unwrap();
+    fs::write(root.join("custom-env/Lib/package/static/client.js"), "").unwrap();
+    assert!(files(&root).unwrap().is_empty());
+    assert!(!supports(&root).unwrap());
+
+    fs::write(root.join("main.ts"), "export const answer = 42;\n").unwrap();
+    assert!(supports(&root).unwrap());
+    assert_eq!(files(&root).unwrap(), [root.join("main.ts")]);
+
+    assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
+    assert!(
+        root.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("refscape-ts-python-environments-")
+    );
+    fs::remove_dir_all(root).unwrap();
+}

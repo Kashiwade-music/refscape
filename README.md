@@ -1,5 +1,5 @@
 # Refscape
-A native spatial code explorer for navigating Rust, C/C++, and TypeScript/JavaScript (including React and React Native) through references and definitions.
+A native spatial code explorer for navigating Rust, C/C++, TypeScript/JavaScript (including React and React Native), and Python through references and definitions.
 
 ## 概要
 
@@ -35,11 +35,12 @@ crateやmoduleの単位は、上記コードカード包む領域として表現
 ファイルパスはコードカード上部に小さく表示する。\
 Zoom Levelで表示階層を切り替える。
 
-なお、コードの構造解析はヒューリスティックには行わず、各言語の公式が提供する機能（LSP等）を用いて実施する。
+なお、コードの構造解析はヒューリスティックには行わず、各言語に対応した解析バックエンド（LSP等）を用いて実施する。
+PythonではMicrosoftのPyrightを基に、semantic tokensを提供するbasedpyrightを使用する。
 
 ## 起動
 
-Windowsを優先したRust/Cargo、C/C++、TypeScript/JavaScriptプロジェクト向けの実装。Refscape自体のビルドにはRustup、MSVC C++ Build Tools、
+Windowsを優先したRust/Cargo、C/C++、TypeScript/JavaScript、Pythonプロジェクト向けの実装。Refscape自体のビルドにはRustup、MSVC C++ Build Tools、
 Windows SDKが必要。GPUIのプラットフォーム依存については
 [固定コミットのGPUI README](https://github.com/zed-industries/zed/blob/f8c2cc844057540ca1eac7de4f19f50d7597dead/crates/gpui/README.md)
 を参照。Rustはリポジトリの `rust-toolchain.toml` で `1.98.1` に固定している。
@@ -68,7 +69,7 @@ cargo build --release --locked
 .\target\release\refscape.exe examples/demo
 ```
 
-Rustの解析には `rust-analyzer`、C/C++の解析には `clangd`、TypeScript/JavaScriptには公式の `tsserver` を使用し、ソースの構造を正規表現などで推測しない。
+Rustの解析には `rust-analyzer`、C/C++の解析には `clangd`、TypeScript/JavaScriptには公式の `tsserver`、PythonにはPyrightベースの `basedpyright` を使用し、ソースの構造を正規表現などで推測しない。
 `tsserver` とのLSP通信には [typescript-language-server](https://github.com/typescript-language-server/typescript-language-server) を使用する。
 初回解析にはプロジェクトの依存取得・インデックス作成が必要になる。
 プロジェクトが独自のRust toolchainを指定する場合、そのtoolchainにも
@@ -80,7 +81,7 @@ Rustの解析には `rust-analyzer`、C/C++の解析には `clangd`、TypeScript
 LLVMの `clangd` をインストールし、PATHに追加する。
 実行ファイルは `--clangd PATH` または `REFSCAPE_CLANGD` 環境変数で指定できる。
 Open projectでは、ビルドフォルダではなくソースのルートフォルダを選ぶ。
-自動判定はCargo、TypeScript/JavaScript、C/C++の順。React NativeのネイティブC/C++ソースがあってもJS/TSを優先する。
+自動判定はCargo、TypeScript/JavaScript、Python、C/C++の順。React NativeのネイティブC/C++ソースがあってもJS/TSを優先する。
 言語を明示する場合は `--language rust` / `--language c` / `--language cpp` を使用する。
 
 ```powershell
@@ -164,6 +165,56 @@ Windowsのnpm shimは対応するCLIをNode.jsで直接起動する。Node.jsの
 別々の設定を持つパッケージも検索できるよう、シンボル検索・参照検索時に各ソースをサーバーで開く。
 解析は開発環境にインストール済みの型定義を利用し、自動の型パッケージ取得は行わない。
 
+### Pythonプロジェクトを開く
+
+Pythonの解析には `basedpyright-langserver --stdio` を使用する。
+basedpyrightはMicrosoft Pyrightを基にした解析サーバーで、semantic tokensによるシンボル分類を追加している。
+Refscapeはサーバーが返す定義・参照・型・所属宣言を使用し、Pythonソースから宣言を推測しない。
+インストール方法とsemantic tokensの詳細は [basedpyrightのインストール](https://docs.basedpyright.com/latest/installation/command-line-and-language-server/) と
+[semantic highlighting](https://docs.basedpyright.com/latest/benefits-over-pyright/pylance-features/#semantic-highlighting) を参照。
+
+```powershell
+# Pythonの開発環境に解析サーバーを追加
+pip install basedpyright
+basedpyright --project examples/python-demo
+cargo run --locked -- examples/python-demo
+
+# npmを使用する場合
+npm install -g basedpyright
+
+# 言語を明示し、ウィンドウなしで解析とセッション復元を検証
+cargo run --locked -- --check examples/python-demo --language python
+
+# プロジェクトの仮想環境にあるサーバーを指定
+cargo run --locked -- "C:\code\my-python-project" --pyright "C:\code\my-python-project\.venv\Scripts\basedpyright-langserver.exe"
+```
+
+`.py` と型スタブの `.pyi` を扱う。class・method・関数・ネストした関数をカードとして表示し、
+所属するclassや関数の宣言も元の行番号・インデントで表示する。
+`.venv` / `venv` などの仮想環境、`site-packages`、`__pycache__`、`.pytest_cache`、`build` / `dist` などはファイル一覧から除外する。
+変数・引数・フィールドのクリックでは同じシンボルの使用箇所をハイライトし、型定義を展開する。
+定義・参照検索、ホバー、シンボル検索と共通のCanvas配置・セッション保存／復元も利用できる。
+付属デモは追加のPythonパッケージを必要とせず、`main.py` から `load_config` / `run` のファイル間呼び出し、
+`Counter.increment` の所属class、`summarize` 内の `annotate` の所属関数、`counter: Counter` の型移動を確認できる。
+実行する場合は `python examples/python-demo/main.py` を使用する（Python 3.10以上）。
+
+`pyrightconfig.json` と `pyproject.toml` の `[tool.basedpyright]` / `[tool.pyright]` 設定を解析サーバーが読み込む。
+`pythonVersion`、`extraPaths`、`stubPath`、`executionEnvironments` などの既存設定を利用し、Refscapeは設定を生成・変更しない。
+basedpyrightはプロジェクト直下の `.venv` にあるPythonを使用し、なければPATH上のPythonを使用する。
+別の仮想環境は既存設定の `venvPath` と `venv` で指定できる。
+依存パッケージは既存の開発手順で対象の環境にインストールしてから開く。
+設定の優先順位・パス解決は [basedpyrightの設定](https://docs.basedpyright.com/latest/configuration/config-files/) と
+[Python環境・import解決](https://docs.basedpyright.com/latest/usage/import-resolution/#configuring-your-python-environment) を参照。
+
+`--language python` / `py` はPythonバックエンドを選択する。
+`--pyright PATH` または `REFSCAPE_PYRIGHT` でサーバーの実行ファイル・npmのcmd shim・`langserver.index.js` を指定できる。
+既定ではプロジェクトまたは親の `.venv` / `venv` と `node_modules/basedpyright` を探し、次にPATH上のサーバーを使用する。
+npmのサーバーはNode.jsで起動し、Node.jsの指定には `REFSCAPE_NODE` を使用する。
+Microsoftの `pyright-langserver` を明示指定することもできるが、semantic tokensを提供しないため、
+シンタックスハイライトと変数・関数のクリック動作の分類には制限がある。
+この場合もAlt + 左クリックによる定義移動、参照検索、ホバーを利用できる。
+Pythonの言語選択もセッションに保存し、復元時に再利用する。
+
 ## 操作
 
 左のファイル一覧からファイルカードを開くか、検索欄にシンボル名を入力してEnterで検索し、
@@ -191,8 +242,8 @@ Windowsのnpm shimは対応するCLIをNode.jsで直接起動する。Node.jsの
 カードの左上を固定して幅・高さを更新し、新たに衝突するカードだけを元の位置に最も近い空きへ移す。
 衝突していないカードは動かさず、縮小時も空きを詰めない。接続線は新しい表示行に追従する。
 省略区間のソースと展開状態もセッションに保存する。
-この配置規則と所属先の宣言表示は、Rust・C/C++・TypeScript/JavaScriptおよび今後追加するすべての言語に共通の必須仕様とする。
-言語ごとのアダプターは公式の解析機能から所属情報を提供し、共通のモデル・配置・描画を利用する。
+この配置規則と所属先の宣言表示は、Rust・C/C++・TypeScript/JavaScript・Pythonおよび今後追加するすべての言語に共通の必須仕様とする。
+言語ごとのアダプターは解析バックエンドから所属情報を提供し、共通のモデル・配置・描画を利用する。
 コードの単語に約400msホバーすると、解析バックエンドが返す型・シグネチャ・ドキュメントを表示する。
 単語から説明へマウスを移してスクロールでき、単語と説明の両方から離れると少し待って閉じる。Escではすぐに閉じる。
 接続元のコード単語に下線を引き、その下線の右端から定義・参照の矢印を伸ばす。
@@ -223,7 +274,7 @@ Windowsのnpm shimは対応するCLIをNode.jsで直接起動する。Node.jsの
 
 65%以上のズームではソースコード、35～65%ではカードの概要、35%未満では領域を表示する。
 Rustの領域はCargo metadataに基づくworkspaceのcrate（Cargo package単位）と、
-ソースファイルごとにカードを包む。C/C++とTypeScript/JavaScriptはプロジェクトとファイルの領域を表示する。
+ソースファイルごとにカードを包む。C/C++、TypeScript/JavaScript、Pythonはプロジェクトとファイルの領域を表示する。
 解析中もCanvasを移動でき、解析・保存のエラーは下部のステータス欄に表示する。
 
 Arrangeは根カードの位置を固定し、そこから接続を辿れる子孫だけを配置する。
@@ -271,11 +322,11 @@ cargo run --locked -- "C:\code\my-project" --theme my-theme.json
 
 - マルチプラットフォーム（Windows/Linux/macOS）
   - まずはWindowsから
-- 多言語対応（Rust/C/C++/TypeScript/JavaScript/React/React Native）
-  - Pythonなどの他言語は今後追加
+- 多言語対応（Rust/C/C++/TypeScript/JavaScript/React/React Native/Python）
+  - その他の言語は今後追加
 
-コード編集機能は持たない。言語解析はRustの `rust-analyzer`、C/C++の `clangd`、TypeScript/JavaScriptの `tsserver` が対象。
-ReactとReact NativeのTSX/JSXコードも対象。Windows以外のプラットフォームとPythonなどの他言語は将来の対応範囲。
+コード編集機能は持たない。言語解析はRustの `rust-analyzer`、C/C++の `clangd`、TypeScript/JavaScriptの `tsserver`、Pythonの `basedpyright` が対象。
+ReactとReact NativeのTSX/JSXコードも対象。Windows以外のプラットフォームとその他の言語は将来の対応範囲。
 GPUIが使う描画バックエンドに対応したGPUドライバーが必要。
 マクロ展開の仮想URIなど、実ファイルに対応しないソースへの移動は未対応で、
 解析バックエンドのエラーを画面に表示する。
@@ -286,8 +337,8 @@ GPUIが使う描画バックエンドに対応したGPUドライバーが必要�
 
 ## 開発
 
-製品は11 crateのCargo workspaceで構成し、開発用の `xtask` は独立したworkspaceとする。
-共通LSP処理とCanvas配置を独立させ、Rust、C/C++、TypeScript/JavaScriptの解析はそれぞれの言語crateが実装する。
+製品は12 crateのCargo workspaceで構成し、開発用の `xtask` は独立したworkspaceとする。
+共通LSP処理とCanvas配置を独立させ、Rust、C/C++、TypeScript/JavaScript、Pythonの解析はそれぞれの言語crateが実装する。
 今後の言語も専用crateを追加し、選択層へ登録する。言語crate同士の依存と、全種類の内部依存の循環を禁止する。
 各crateの責務・依存方向・検査ルールは [アーキテクチャ](docs/architecture.md) を参照。
 1ソースファイルは空行・コメント・文字列を除いて `max_file_lines`（1000行）以下とし、子を持つRustモジュールは `<name>.rs` と `<name>/` の組で配置する。`mod.rs` は使わない。
@@ -318,6 +369,10 @@ cargo test -p refscape-app --locked --test cpp_workflow -- --ignored
 cargo test -p refscape-language-typescript --locked --test typescript -- --ignored
 cargo test -p refscape-app --locked --test typescript_workflow -- --ignored
 
+# basedpyrightでPythonの実解析・Canvas操作・セッション復元
+cargo test -p refscape-language-python --locked --test python -- --ignored
+cargo test -p refscape-app --locked --test python_workflow -- --ignored
+
 # 全言語間の切り替えと失敗時のプロジェクト保持
 cargo test -p refscape-language --locked --test backends -- --ignored
 
@@ -326,7 +381,7 @@ cargo run --locked -- --check "C:\code\my-project"
 ```
 
 `cargo xtask gate` が構造検査に成功すると、`docs/dependency-graph.md` を自動生成・更新する。
-実サーバーのテストは外部の `rust-analyzer` / `clangd` / `typescript-language-server` が必要なため通常はignoreされる。
+実サーバーのテストは外部の `rust-analyzer` / `clangd` / `typescript-language-server` / `basedpyright-langserver` が必要なため通常はignoreされる。
 
 実GPUによる描画確認用のexampleも用意する。`main` を持つプロジェクトで、
 ライト／ダークのPNGを出力できる。GPUとデスクトップ環境が必要。

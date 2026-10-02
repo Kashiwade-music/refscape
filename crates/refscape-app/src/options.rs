@@ -1,14 +1,15 @@
 use refscape_model::{ProjectLanguage, ProjectOptions};
 use std::{ffi::OsString, path::PathBuf};
 
-pub const HELP: &str = "Refscape — a spatial Rust, C/C++, and TypeScript/React code explorer\n\n\
+pub const HELP: &str = "Refscape — a spatial Rust, C/C++, TypeScript/React, and Python code explorer\n\n\
 Usage: refscape [PROJECT] [OPTIONS]\n\n\
   --session FILE       Open/save a named session (default: PROJECT/.refscape/session.json)\n\
   --theme FILE         Add a custom JSON theme\n\
   --rust-analyzer EXE  Override the rust-analyzer executable\n\
   --clangd EXE         Override the C/C++ language server executable\n\
   --typescript-language-server PATH  Override the JS/TS server executable or lib/cli.mjs\n\
-  --language LANGUAGE  Choose auto (default), rust, c, cpp, or typescript (ts)\n\
+  --pyright PATH       Override the Python language server executable or langserver.index.js\n\
+  --language LANGUAGE  Choose auto (default), rust, c, cpp, typescript (ts), or python (py)\n\
   --compile-commands PATH  Use compile_commands.json or its containing directory\n\
   --check PROJECT      Verify analysis and session persistence without a window\n\
   --export-theme NAME FILE  Write the light or dark theme as a customizable JSON file\n\
@@ -16,7 +17,8 @@ Usage: refscape [PROJECT] [OPTIONS]\n\n\
 Without PROJECT, choose a source folder using Open project in the window.\n\
 Rust: rustup component add rust-analyzer rust-src\n\
 C/C++: install clangd; build settings are detected or chosen with Build settings.\n\
-TypeScript/React/React Native: install Node.js and npm install -g typescript typescript-language-server.\n";
+TypeScript/React/React Native: install Node.js and npm install -g typescript typescript-language-server.\n\
+Python: pip install basedpyright or npm install -g basedpyright.\n";
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Options {
@@ -26,6 +28,7 @@ pub struct Options {
     pub analyzer: Option<PathBuf>,
     pub clangd: Option<PathBuf>,
     pub typescript: Option<PathBuf>,
+    pub pyright: Option<PathBuf>,
     pub project_options: ProjectOptions,
     pub check: bool,
     pub help: bool,
@@ -49,9 +52,9 @@ impl Options {
                 "--" => positional = true,
                 "--help" | "-h" => options.help = true,
                 "--language" => {
-                    let language = args
-                        .next()
-                        .ok_or("--language requires auto, rust, c, cpp, or typescript (ts)")?;
+                    let language = args.next().ok_or(
+                        "--language requires auto, rust, c, cpp, typescript (ts), or python (py)",
+                    )?;
                     options.project_options.language = match language.to_str() {
                         Some("auto") => ProjectLanguage::Auto,
                         Some("rust") => ProjectLanguage::Rust,
@@ -59,9 +62,10 @@ impl Options {
                         Some(
                             "typescript" | "ts" | "javascript" | "js" | "react" | "react-native",
                         ) => ProjectLanguage::TypeScript,
+                        Some("python" | "py") => ProjectLanguage::Python,
                         _ => {
                             return Err(
-                                "--language requires auto, rust, c, cpp, or typescript (ts)".into(),
+                                "--language requires auto, rust, c, cpp, typescript (ts), or python (py)".into(),
                             );
                         }
                     };
@@ -72,6 +76,7 @@ impl Options {
                 | "--clangd"
                 | "--compile-commands"
                 | "--typescript-language-server"
+                | "--pyright"
                 | "--check" => {
                     let path = args
                         .next()
@@ -85,6 +90,7 @@ impl Options {
                         "--rust-analyzer" => options.analyzer = Some(path.into()),
                         "--clangd" => options.clangd = Some(path.into()),
                         "--typescript-language-server" => options.typescript = Some(path.into()),
+                        "--pyright" => options.pyright = Some(path.into()),
                         "--compile-commands" => {
                             options.project_options.compilation_database = Some(path.into())
                         }
@@ -125,7 +131,7 @@ impl Options {
         }
         if matches!(
             options.project_options.language,
-            ProjectLanguage::Rust | ProjectLanguage::TypeScript
+            ProjectLanguage::Rust | ProjectLanguage::TypeScript | ProjectLanguage::Python
         ) && options.project_options.compilation_database.is_some()
         {
             return Err("--compile-commands is only supported for C/C++ projects".into());
@@ -159,7 +165,7 @@ mod tests {
             &["--clangd", "--check", "."],
             &["--compile-commands"],
             &["--language"],
-            &["--language", "python"],
+            &["--language", "unknown"],
             &["--language", "rust", "--compile-commands", "build"],
         ] {
             assert!(parse(args).is_err());
@@ -219,5 +225,28 @@ mod tests {
             assert!(parse(&["--language", language, "--compile-commands", "build"]).is_err());
         }
         assert!(parse(&["--typescript-language-server", "--check", "."]).is_err());
+    }
+
+    #[test]
+    fn accepts_python_alias_and_server_override_and_rejects_cpp_settings() {
+        for language in ["python", "py"] {
+            let options = parse(&[
+                "Python project",
+                "--language",
+                language,
+                "--pyright",
+                "custom pyright/dist/langserver.index.js",
+            ])
+            .unwrap();
+            assert_eq!(options.project_options.language, ProjectLanguage::Python);
+            assert_eq!(options.project, Some("Python project".into()));
+            assert_eq!(
+                options.pyright,
+                Some("custom pyright/dist/langserver.index.js".into())
+            );
+            assert!(parse(&["--language", language, "--compile-commands", "build"]).is_err());
+        }
+        assert!(parse(&["--pyright"]).is_err());
+        assert!(parse(&["--pyright", "--check", "."]).is_err());
     }
 }

@@ -54,12 +54,19 @@ fn run() -> Result<(), String> {
         .or_else(|| env::var_os("REFSCAPE_CLANGD").map(Into::into))
         .unwrap_or_else(|| "clangd".into());
     let mut explorer = Explorer::new(
-        LanguageBackend::new(analyzer, clangd).with_typescript_server(
-            options
-                .typescript
-                .or_else(|| env::var_os("REFSCAPE_TYPESCRIPT_LANGUAGE_SERVER").map(Into::into))
-                .unwrap_or_else(|| "typescript-language-server".into()),
-        ),
+        LanguageBackend::new(analyzer, clangd)
+            .with_typescript_server(
+                options
+                    .typescript
+                    .or_else(|| env::var_os("REFSCAPE_TYPESCRIPT_LANGUAGE_SERVER").map(Into::into))
+                    .unwrap_or_else(|| "typescript-language-server".into()),
+            )
+            .with_pyright_server(
+                options
+                    .pyright
+                    .or_else(|| env::var_os("REFSCAPE_PYRIGHT").map(Into::into))
+                    .unwrap_or_else(|| "basedpyright-langserver".into()),
+            ),
         JsonSessionRepository,
     );
     if options.check {

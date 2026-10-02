@@ -54,12 +54,47 @@ fn settings_roundtrip_and_first_launch_defaults() {
         typescript_language_server_path: Some(PathBuf::from(
             "tools/typescript-language-server/lib/cli.mjs",
         )),
+        pyright_path: Some(PathBuf::from("tools/pyright/dist/langserver.index.js")),
         ..Settings::default()
     };
     save_settings(&path, &settings).unwrap();
     assert_eq!(load_settings(&path).unwrap(), settings);
     save_settings(&path, &Settings::default()).unwrap();
     assert_eq!(load_settings(&path).unwrap(), Settings::default());
+}
+
+#[test]
+fn pre_python_settings_default_server_path_and_preserve_existing_overrides() {
+    let directory = TestDirectory::new();
+    let path = directory.path("settings.json");
+    let mut previous = serde_json::to_value(Settings {
+        clangd_path: Some("tools/clangd".into()),
+        typescript_language_server_path: Some("tools/typescript-language-server".into()),
+        ..Settings::default()
+    })
+    .unwrap();
+    previous.as_object_mut().unwrap().remove("pyright_path");
+    fs::write(&path, serde_json::to_vec(&previous).unwrap()).unwrap();
+    let settings = load_settings(&path).unwrap();
+    assert_eq!(settings.pyright_path, None);
+    assert_eq!(settings.clangd_path, Some("tools/clangd".into()));
+    assert_eq!(
+        settings.typescript_language_server_path,
+        Some("tools/typescript-language-server".into())
+    );
+}
+
+#[test]
+fn python_session_preserves_language_without_a_version_change() {
+    let directory = TestDirectory::new();
+    let path = directory.path("python-session.json");
+    let mut session = Session::new(directory.0.clone());
+    session.project_options.language = ProjectLanguage::Python;
+    JsonSessionRepository.save(&path, &session).unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(document["version"], 1);
+    assert_eq!(document["project_options"]["language"], "python");
+    assert_eq!(JsonSessionRepository.load(&path).unwrap(), session);
 }
 
 #[test]
@@ -120,6 +155,13 @@ fn obsolete_layout_settings_are_ignored_and_removed_when_resaved() {
 
 #[test]
 fn partially_specified_project_options_use_field_defaults() {
+    let options: ProjectOptions = serde_json::from_str(r#"{"language":"python"}"#).unwrap();
+    assert_eq!(options.language, ProjectLanguage::Python);
+    assert_eq!(options.compilation_database, None);
+    assert_eq!(
+        serde_json::to_value(&options).unwrap()["language"],
+        "python"
+    );
     let options: ProjectOptions = serde_json::from_str(r#"{"language":"typescript"}"#).unwrap();
     assert_eq!(options.language, ProjectLanguage::TypeScript);
     assert_eq!(

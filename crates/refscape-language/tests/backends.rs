@@ -151,3 +151,44 @@ fn router_switches_all_three_languages_and_preserves_typescript_on_failed_switch
         .unwrap();
     assert_eq!(backend.project_options().language, ProjectLanguage::Rust);
 }
+
+#[test]
+#[ignore = "requires rust-analyzer, clangd, basedpyright, and npm install in examples/typescript-demo"]
+fn router_switches_all_four_languages_and_preserves_python_after_failed_switch() {
+    let fixture = Fixture::new();
+    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let python = examples.join("python-demo").canonicalize().unwrap();
+    let mut backend = LanguageBackend::default().with_timeout(Duration::from_secs(45));
+    for (root, language) in [
+        (fixture.0.join("rust"), ProjectLanguage::Rust),
+        (fixture.0.join("cpp"), ProjectLanguage::Cpp),
+        (
+            examples.join("typescript-demo").canonicalize().unwrap(),
+            ProjectLanguage::TypeScript,
+        ),
+        (python.clone(), ProjectLanguage::Python),
+    ] {
+        backend
+            .open_project(&root, &ProjectOptions::default())
+            .unwrap();
+        assert_eq!(backend.project_options().language, language);
+        assert!(!backend.files().unwrap().is_empty());
+    }
+    let incompatible = ProjectOptions {
+        language: ProjectLanguage::Python,
+        compilation_database: Some("build".into()),
+    };
+    assert!(backend.open_project(&python, &incompatible).is_err());
+    assert_eq!(backend.project_options().language, ProjectLanguage::Python);
+    assert!(
+        backend
+            .symbols(&python.join("model.py"))
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol.name == "Counter")
+    );
+    backend
+        .open_project(&fixture.0.join("rust"), &ProjectOptions::default())
+        .unwrap();
+    assert_eq!(backend.project_options().language, ProjectLanguage::Rust);
+}

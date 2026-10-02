@@ -194,3 +194,51 @@ fn saved_project_metadata_requires_a_valid_session_and_never_starts_backend() {
     assert_eq!(inspected.language.open_count, startup_count);
     assert_eq!(inspected.session, before);
 }
+
+#[test]
+fn python_session_restores_and_explicit_override_clears_saved_cpp_database() {
+    struct Saved(Session);
+    impl SessionRepository for Saved {
+        fn save(&self, _: &Path, _: &Session) -> Result<()> {
+            Ok(())
+        }
+        fn load(&self, _: &Path) -> Result<Session> {
+            Ok(self.0.clone())
+        }
+    }
+    let original = explorer();
+    let root = original.session.project_root.clone();
+    let python = ProjectOptions {
+        language: ProjectLanguage::Python,
+        compilation_database: None,
+    };
+    let mut saved = original.session;
+    saved.project_options = python.clone();
+    let mut restored = Explorer::new(original.language, Saved(saved.clone()));
+    restored.load_session(Path::new("session.json")).unwrap();
+    assert_eq!(restored.language.options, python);
+    assert_eq!(restored.session, saved);
+
+    restored.repository.0.project_options = ProjectOptions {
+        language: ProjectLanguage::Cpp,
+        compilation_database: Some(root.join("compile_commands.json")),
+    };
+    restored
+        .load_project_session(Path::new("session.json"), &root, &python)
+        .unwrap();
+    assert_eq!(restored.language.options, python);
+    assert_eq!(restored.session.project_options, python);
+    let before = restored.session.clone();
+    let startup_count = restored.language.open_count;
+    let invalid = ProjectOptions {
+        compilation_database: Some(root.join("build")),
+        ..python
+    };
+    assert!(
+        restored
+            .load_project_session(Path::new("session.json"), &root, &invalid)
+            .is_err()
+    );
+    assert_eq!(restored.language.open_count, startup_count);
+    assert_eq!(restored.session, before);
+}
