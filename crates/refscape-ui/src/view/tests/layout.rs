@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn connected_explorer() -> Explorer<Language, Repository> {
+pub(super) fn connected_explorer() -> FixtureDriver {
     let range = SourceRange {
         start: Position::new(12, 5),
         end: Position::new(12, 13),
@@ -9,7 +9,7 @@ pub(super) fn connected_explorer() -> Explorer<Language, Repository> {
         Symbol::file("far.rs".into(), range),
         Symbol::file("lower.rs".into(), range),
     ]);
-    let root = explorer.session().cards[0].id.clone();
+    let root = explorer.snapshot().cards[0].id.clone();
     let children = explorer
         .expand_definition(&root, Position::new(12, 9))
         .unwrap();
@@ -31,14 +31,14 @@ pub(super) fn connected_explorer() -> Explorer<Language, Repository> {
 #[gpui::test]
 fn explicit_arrange_places_the_connected_tree_and_undo_restores_positions(cx: &mut TestAppContext) {
     let explorer = connected_explorer();
-    let before = explorer.session().cards.clone();
+    let before = explorer.snapshot().cards.clone();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
@@ -47,10 +47,10 @@ fn explicit_arrange_places_the_connected_tree_and_undo_restores_positions(cx: &m
     view.update(cx, |view, cx| view.arrange_layout(cx));
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
-        assert_ne!(view.session.cards, before);
-        assert_eq!(view.session.cards[0], before[0]);
-        assert_eq!(view.session.cards[3], before[3]);
-        let children = &view.session.cards[1..3];
+        assert_ne!(view.controller.snapshot().cards, before);
+        assert_eq!(view.controller.snapshot().cards[0], before[0]);
+        assert_eq!(view.controller.snapshot().cards[3], before[3]);
+        let children = &view.controller.snapshot().cards[1..3];
         assert_eq!(
             children[0].position.x,
             before[0].position.x + before[0].width + 100.0
@@ -58,7 +58,7 @@ fn explicit_arrange_places_the_connected_tree_and_undo_restores_positions(cx: &m
         assert_eq!(children[0].position.x, children[1].position.x);
         assert!(children[0].position.y < children[1].position.y);
         assert!(view.layout.can_undo);
-        refscape_canvas::layout::validate_layout(&view.session.cards, Default::default()).unwrap();
+        assert_layout(view.controller.snapshot());
     });
     view.update(cx, |view, cx| view.undo_layout(cx));
     cx.run_until_parked();
@@ -66,7 +66,7 @@ fn explicit_arrange_places_the_connected_tree_and_undo_restores_positions(cx: &m
         .advance_clock(std::time::Duration::from_secs(1));
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
-        assert_eq!(view.session.cards, before);
+        assert_eq!(view.controller.snapshot().cards, before);
         assert!(!view.layout.can_undo);
     });
 }
@@ -74,15 +74,15 @@ fn explicit_arrange_places_the_connected_tree_and_undo_restores_positions(cx: &m
 #[gpui::test]
 fn ordinary_addition_and_deletion_leave_survivors_fixed_after_idle(cx: &mut TestAppContext) {
     let explorer = connected_explorer();
-    let before = explorer.session().cards.clone();
+    let before = explorer.snapshot().cards.clone();
     let added = Symbol::file("extra.rs".into(), before[0].source.symbol.range);
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
@@ -94,8 +94,11 @@ fn ordinary_addition_and_deletion_leave_survivors_fixed_after_idle(cx: &mut Test
         .advance_clock(std::time::Duration::from_secs(1));
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
-        assert_eq!(view.session.cards.len(), before.len() + 1);
-        assert_eq!(&view.session.cards[..before.len()], before.as_slice());
+        assert_eq!(view.controller.snapshot().cards.len(), before.len() + 1);
+        assert_eq!(
+            &view.controller.snapshot().cards[..before.len()],
+            before.as_slice()
+        );
     });
     view.update(cx, |view, cx| view.toggle_symbol(added, cx));
     cx.run_until_parked();
@@ -103,7 +106,7 @@ fn ordinary_addition_and_deletion_leave_survivors_fixed_after_idle(cx: &mut Test
         .advance_clock(std::time::Duration::from_secs(1));
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
-        assert_eq!(view.session.cards, before);
+        assert_eq!(view.controller.snapshot().cards, before);
         assert!(!view.layout.can_undo);
     });
 }
@@ -111,14 +114,14 @@ fn ordinary_addition_and_deletion_leave_survivors_fixed_after_idle(cx: &mut Test
 #[gpui::test]
 fn camera_input_and_idle_leave_card_positions_unchanged(cx: &mut TestAppContext) {
     let explorer = connected_explorer();
-    let before = explorer.session().cards.clone();
+    let before = explorer.snapshot().cards.clone();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
@@ -129,46 +132,60 @@ fn camera_input_and_idle_leave_card_positions_unchanged(cx: &mut TestAppContext)
         .advance_clock(std::time::Duration::from_secs(1));
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
-        assert_eq!(view.session.cards, before);
-        assert_eq!(view.session.viewport.zoom, 1.25);
+        assert_eq!(view.controller.snapshot().cards, before);
+        assert_eq!(view.controller.snapshot().viewport.zoom, 1.25);
     });
 }
 
 #[gpui::test]
 fn arrange_waits_for_analysis_shutdown_and_active_pan(cx: &mut TestAppContext) {
     let explorer = connected_explorer();
-    let before = explorer.session().cards.clone();
+    let before = explorer.snapshot().cards.clone();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
     });
     cx.run_until_parked();
     view.update(cx, |view, cx| {
-        view.requests.busy = true;
+        let query = view.controller.dispatch(Command::Search("busy".into()));
+        assert!(view.controller.busy());
         view.arrange_layout(cx);
-        view.requests.busy = false;
-        view.requests.closing = true;
+        for effect in query.effects {
+            let completion = view.executor.execute(effect);
+            let transition = view.controller.complete(completion);
+            view.transition(transition, cx);
+        }
+        let close = view.controller.dispatch(Command::RequestClose);
+        assert!(view.controller.closing());
         view.arrange_layout(cx);
-        view.requests.closing = false;
-        view.canvas.drag = Some(Drag::Pan(point(px(0.0), px(0.0))));
+        for effect in close.effects {
+            let completion = view.executor.execute(effect);
+            let transition = view.controller.complete(completion);
+            view.transition(transition, cx);
+        }
+        assert!(!view.controller.closing());
+        view.canvas.drag = Some(Drag::Pan(MouseButton::Left, point(px(0.0), px(0.0))));
+        view.layout_activity(cx);
         view.arrange_layout(cx);
     });
     cx.run_until_parked();
-    view.read_with(cx, |view, _| assert_eq!(view.session.cards, before));
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.controller.snapshot().cards, before)
+    });
     view.update(cx, |view, cx| {
         view.finish_drag(cx);
         view.arrange_layout(cx);
     });
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
-        assert_ne!(view.session.cards, before);
+        assert_ne!(view.controller.snapshot().cards, before);
         assert!(view.layout.can_undo);
     });
 }
@@ -176,14 +193,14 @@ fn arrange_waits_for_analysis_shutdown_and_active_pan(cx: &mut TestAppContext) {
 #[gpui::test]
 fn an_inflight_arrange_replans_the_latest_selected_leaf_and_viewport(cx: &mut TestAppContext) {
     let explorer = connected_explorer();
-    let before = explorer.session().cards.clone();
+    let before = explorer.snapshot().cards.clone();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
@@ -191,78 +208,96 @@ fn an_inflight_arrange_replans_the_latest_selected_leaf_and_viewport(cx: &mut Te
     cx.run_until_parked();
     view.update(cx, |view, cx| {
         view.arrange_layout(cx);
-        view.canvas.selected = Some(before[1].id.clone());
+        view.canvas.selected = Some(before[1].id.to_string());
+        view.layout_activity(cx);
         view.zoom(1.25, Point::default(), cx);
     });
-    let viewport = view.read_with(cx, |view, _| view.session.viewport);
+    let viewport = view.read_with(cx, |view, _| view.controller.snapshot().viewport);
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
-        assert_eq!(view.session.cards, before);
+        assert_eq!(view.controller.snapshot().cards, before);
         assert!(!view.requests.busy);
-        assert_eq!(view.session.viewport, viewport);
+        assert_eq!(view.controller.snapshot().viewport, viewport);
         assert!(!view.layout.can_undo);
     });
 }
 #[gpui::test]
 fn sidebar_selection_during_arrange_replans_only_the_latest_root_tree(cx: &mut TestAppContext) {
     let mut explorer = connected_explorer();
-    let latest_root = explorer.session().cards[1].id.clone();
+    let latest_root = explorer.snapshot().cards[1].id.clone();
     // The existing second sibling also becomes a descendant of this root.
     explorer
         .expand_definition(&latest_root, Position::new(12, 9))
         .unwrap();
-    let before = explorer.session().cards.clone();
+    let before = explorer.snapshot().cards.clone();
     let symbol = before[1].source.symbol.clone();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
     });
     cx.run_until_parked();
-    let old_commit = view.read_with(cx, |view, _| {
-        view.explorer
-            .lock()
-            .unwrap()
-            .plan_layout(Some(&before[0].id))
-            .unwrap()
-    });
-    assert!(
-        old_commit.changed,
+    let mut probe = connected_explorer();
+    probe
+        .expand_definition(&latest_root, Position::new(12, 9))
+        .unwrap();
+    probe
+        .dispatch(Command::Arrange {
+            selected: Some(before[0].id.to_string()),
+        })
+        .unwrap();
+    assert_ne!(
+        probe.snapshot().cards,
+        before,
         "the old root must have a distinct placement candidate"
     );
+    let old_commit = view.update(cx, |view, _| {
+        let transition = view.controller.dispatch(Command::Arrange {
+            selected: Some(before[0].id.to_string()),
+        });
+        view.executor
+            .execute(transition.effects.into_iter().next().unwrap())
+    });
     view.update(cx, |view, cx| {
-        view.canvas.selected = Some(before[0].id.clone());
-        view.requests.busy = true;
-        view.layout.planning = true;
-        let epoch = view.layout.session_epoch;
-        let revision = view.layout.revision;
+        view.canvas.selected = Some(before[0].id.to_string());
         view.toggle_symbol(symbol, cx);
-        assert_eq!(view.canvas.selected.as_ref(), Some(&latest_root));
+        assert_eq!(view.canvas.selected.as_deref(), Some(latest_root.as_str()));
         assert_eq!(
-            view.session.cards, before,
+            view.controller.snapshot().cards,
+            before,
             "busy sidebar selection must not remove a card"
         );
-        assert_ne!(view.layout.revision, revision);
-        view.complete_layout(Ok(old_commit), epoch, revision, cx);
+        let transition = view.controller.complete(old_commit);
+        assert!(
+            !transition.effects.is_empty(),
+            "latest root must be replanned before commit"
+        );
+        view.transition(transition, cx);
     });
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
-        assert_eq!(view.session.cards[0], before[0]);
-        assert_eq!(view.session.cards[1], before[1]);
-        assert_eq!(view.session.cards[3], before[3]);
-        assert_ne!(view.session.cards[2].position, before[2].position);
-        assert!(view.session.cards[2].position.x >= before[1].position.x + before[1].width + 100.0);
-        assert_eq!(view.canvas.selected.as_ref(), Some(&latest_root));
+        assert_eq!(view.controller.snapshot().cards[0], before[0]);
+        assert_eq!(view.controller.snapshot().cards[1], before[1]);
+        assert_eq!(view.controller.snapshot().cards[3], before[3]);
+        assert_ne!(
+            view.controller.snapshot().cards[2].position,
+            before[2].position
+        );
+        assert!(
+            view.controller.snapshot().cards[2].position.x
+                >= before[1].position.x + before[1].width + 100.0
+        );
+        assert_eq!(view.canvas.selected.as_deref(), Some(latest_root.as_str()));
         assert!(!view.requests.busy);
         assert!(!view.requests.error, "{}", view.requests.status);
         assert!(view.layout.can_undo);
-        refscape_canvas::layout::validate_layout(&view.session.cards, Default::default()).unwrap();
+        assert_layout(view.controller.snapshot());
     });
 }
 
@@ -270,12 +305,12 @@ fn sidebar_selection_during_arrange_replans_only_the_latest_root_tree(cx: &mut T
 fn dropping_a_card_invalidates_the_previous_layout_undo(cx: &mut TestAppContext) {
     let explorer = connected_explorer();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
@@ -285,11 +320,11 @@ fn dropping_a_card_invalidates_the_previous_layout_undo(cx: &mut TestAppContext)
     cx.run_until_parked();
     view.update(cx, |view, cx| {
         assert!(view.layout.can_undo);
-        let card = &view.session.cards[1];
+        let card = &view.controller.snapshot().cards[1];
         view.canvas.drag = Some(Drag::Card(
-            card.id.clone(),
+            card.id.to_string(),
             point(px(0.0), px(0.0)),
-            card.position,
+            card.position.point(),
         ));
         view.mouse_move(
             &MouseMoveEvent {
@@ -303,11 +338,13 @@ fn dropping_a_card_invalidates_the_previous_layout_undo(cx: &mut TestAppContext)
     cx.run_until_parked();
     let dropped = view.read_with(cx, |view, _| {
         assert!(!view.layout.can_undo);
-        view.session.cards.clone()
+        view.controller.snapshot().cards.clone()
     });
     view.update(cx, |view, cx| view.undo_layout(cx));
     cx.run_until_parked();
-    view.read_with(cx, |view, _| assert_eq!(view.session.cards, dropped));
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.controller.snapshot().cards, dropped)
+    });
 }
 
 #[gpui::test]
@@ -315,14 +352,14 @@ fn arrange_waits_for_an_inflight_drag_and_then_fixes_the_latest_selected_card(
     cx: &mut TestAppContext,
 ) {
     let explorer = connected_explorer();
-    let before = explorer.session().cards.clone();
+    let before = explorer.snapshot().cards.clone();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
@@ -330,12 +367,12 @@ fn arrange_waits_for_an_inflight_drag_and_then_fixes_the_latest_selected_card(
     cx.run_until_parked();
     view.update(cx, |view, cx| {
         view.arrange_layout(cx);
-        let card = &view.session.cards[1];
-        view.canvas.selected = Some(card.id.clone());
+        let card = &view.controller.snapshot().cards[1];
+        view.canvas.selected = Some(card.id.to_string());
         view.canvas.drag = Some(Drag::Card(
-            card.id.clone(),
+            card.id.to_string(),
             point(px(0.0), px(0.0)),
-            card.position,
+            card.position.point(),
         ));
         view.mouse_move(
             &MouseMoveEvent {
@@ -347,17 +384,20 @@ fn arrange_waits_for_an_inflight_drag_and_then_fixes_the_latest_selected_card(
     });
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
-        assert_eq!(view.session.cards, before);
+        assert_eq!(view.controller.snapshot().cards, before);
         assert!(view.canvas.drag_preview.is_some());
     });
     view.update(cx, |view, cx| view.finish_drag(cx));
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
-        assert_eq!(view.session.cards[1].position, Point::new(6000.0, 50.0));
+        assert_eq!(
+            view.controller.snapshot().cards[1].position,
+            Point::new(6000.0, 50.0)
+        );
         assert!(!view.requests.busy);
         assert!(!view.layout.can_undo);
         assert!(view.canvas.drag_preview.is_none());
-        refscape_canvas::layout::validate_layout(&view.session.cards, Default::default()).unwrap();
+        assert_layout(view.controller.snapshot());
     });
 }
 
@@ -390,12 +430,12 @@ fn measured_symbol_anchor_is_stable_across_camera_and_glyphs(cx: &mut TestAppCon
     };
     let (explorer, _) = source_fixture(source, vec![]);
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
@@ -409,14 +449,18 @@ fn measured_symbol_anchor_is_stable_across_camera_and_glyphs(cx: &mut TestAppCon
         (1.5, Point::new(-20.0, 10.0)),
     ] {
         view.update(cx, |view, cx| {
-            view.session.viewport.zoom = zoom;
-            view.session.viewport.offset = offset;
-            cx.notify();
+            view.command(
+                Command::SetViewport(Viewport {
+                    zoom,
+                    offset: offset.try_into().unwrap(),
+                }),
+                cx,
+            );
         });
         cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
             .unwrap();
         view.read_with(cx, |view, _| {
-            let card = &view.session.cards[0];
+            let card = &view.controller.snapshot().cards[0];
             let painted = &view.canvas.painted[0];
             let anchor =
                 shaping::symbol_anchor_offset(card, painted, Position::new(12, 10)).unwrap();
@@ -440,4 +484,62 @@ fn measured_symbol_anchor_is_stable_across_camera_and_glyphs(cx: &mut TestAppCon
             }
         });
     }
+}
+
+pub(super) fn assert_layout(snapshot: &ApplicationSnapshot) {
+    for (index, card) in snapshot.cards.iter().enumerate() {
+        card.validate_geometry().unwrap();
+        for other in &snapshot.cards[..index] {
+            let gap = 74.0_f64;
+            let overlap = f64::from(card.position.x)
+                < f64::from(other.position.x) + f64::from(other.width) + gap
+                && f64::from(card.position.x) + f64::from(card.width) + gap
+                    > f64::from(other.position.x)
+                && f64::from(card.position.y)
+                    < f64::from(other.position.y) + f64::from(other.display_height()) + gap
+                && f64::from(card.position.y) + f64::from(card.display_height()) + gap
+                    > f64::from(other.position.y);
+            assert!(!overlap, "{} overlaps {}", card.id, other.id);
+        }
+    }
+}
+
+#[gpui::test]
+fn pan_reuses_source_snapshots_and_warmed_glyph_shapes(cx: &mut TestAppContext) {
+    let (fixture, _) = fixture();
+    let source = fixture.snapshot().cards[0].source.snapshot().clone();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        ExplorerView::from_fixture(
+            fixture,
+            "session.json".into(),
+            vec![],
+            None,
+            ProjectOpenOptions::default(),
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    let handle = cx.window_handle();
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let before = view.read_with(cx, |view, _| view.scene.borrow().shaped_rows);
+    assert!(before > 0, "the initial visible source must be shaped");
+    view.update(cx, |view, cx| {
+        view.command(Command::Pan(Point::new(10.0, 5.0)), cx)
+    });
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    view.read_with(cx, |view, _| {
+        assert_eq!(
+            view.scene.borrow().shaped_rows,
+            before,
+            "pan must reuse source glyphs"
+        );
+        assert!(Arc::ptr_eq(
+            view.controller.snapshot().cards[0].source.snapshot(),
+            &source
+        ));
+    });
 }

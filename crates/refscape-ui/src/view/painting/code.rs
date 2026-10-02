@@ -1,16 +1,21 @@
 //! Code rows have independent control, right-aligned line-number, and source columns.
-use super::*;
+use super::{PaintedNumber, PaintedRow, text};
 use crate::view::shaping::{code_runs, variable_highlight_spans};
+use crate::view::{HEADER, LINE, render::color, scene};
+use gpui::{App, Bounds, Pixels, TextAlign, TextRun, Window, fill, point, px, size};
+use refscape_application::{ApplicationSnapshot, VariableInspection};
+use refscape_model::CodeCard;
 
 pub(super) fn paint_code(
     card: &CodeCard,
-    session: &Session,
-    context_hover: Option<&(String, usize)>,
-    inspection: Option<&VariableInspection>,
+    session: &ApplicationSnapshot,
+    interaction: (Option<&(String, usize)>, Option<&VariableInspection>),
+    cache: &mut scene::SceneCache,
     areas: (Bounds<Pixels>, Bounds<Pixels>),
     window: &mut Window,
     cx: &mut App,
-) -> (gpui::Point<Pixels>, Vec<PaintedRow>) {
+) -> (gpui::Point<Pixels>, usize, Vec<PaintedRow>) {
+    let (context_hover, inspection) = interaction;
     let zoom = session.viewport.zoom;
     let (rect, canvas) = areas;
     let palette = &session.theme.palette;
@@ -18,12 +23,13 @@ pub(super) fn paint_code(
         rect.left() + px(card.source.code_gutter_width() * zoom),
         rect.top() + px((HEADER + 8.0) * zoom),
     );
-    if zoom < 0.65 {
+    if scene::DetailLevel::from_zoom(zoom) != scene::DetailLevel::Code {
+        cache.frame_work.summary_metric_reads += 1;
         text(
             format!(
                 "{} · {} lines",
                 card.source.symbol.kind,
-                card.source.code.lines().count()
+                card.source.body_line_count()
             ),
             origin,
             11.0,
@@ -31,34 +37,39 @@ pub(super) fn paint_code(
             window,
             cx,
         );
-        return (origin, vec![]);
+        return (origin, 0, vec![]);
     }
     let mut rows = Vec::new();
-    for (index, source) in card.source.display_lines().into_iter().enumerate() {
+    let projection = card.source.projection();
+    let first_row = ((f32::from(canvas.top() - origin.y) / (LINE * zoom))
+        .floor()
+        .max(0.0) as usize)
+        .min(projection.rows.len());
+    let last_row = ((f32::from(canvas.bottom() - origin.y) / (LINE * zoom))
+        .ceil()
+        .max(0.0) as usize)
+        .min(projection.rows.len());
+    for index in first_row..last_row {
+        cache.frame_work.visible_rows += 1;
+        let source = &projection.rows[index];
         let y = origin.y + px(index as f32 * LINE * zoom);
         let mut runs = code_runs(
-            &source.text,
-            source.position.map_or(u32::MAX, |position| position.line),
-            source.position.map_or(0, |position| position.character),
-            &card.source.tokens,
+            source.text(),
+            source.position().map_or(u32::MAX, |position| position.line),
+            source.position().map_or(0, |position| position.character),
+            projection
+                .token_indices(source.position().map_or(u32::MAX, |p| p.line))
+                .iter()
+                .filter_map(|index| card.source.tokens.get(*index)),
             palette,
         );
-        if source.position.is_none() {
+        if source.position().is_none() {
             for run in &mut runs {
                 run.color = color(&palette.muted);
             }
         }
-        let world_code =
-            window
-                .text_system()
-                .shape_line(source.text.to_string().into(), px(12.0), &runs, None);
-        let code = window.text_system().shape_line(
-            source.text.into_owned().into(),
-            px(12.0 * zoom),
-            &runs,
-            None,
-        );
-        let number = source.position.map(|position| {
+        let (world_code, code) = cache.shape(&card.source, index, &runs, zoom, window);
+        let number = source.position().map(|position| {
             let label = (u64::from(position.line) + 1).to_string();
             let run = TextRun {
                 len: label.len(),
@@ -84,8 +95,8 @@ pub(super) fn paint_code(
         let row = PaintedRow {
             code,
             world_code,
-            position: source.position,
-            fold: source.fold,
+            position: source.position(),
+            fold: source.fold(),
             number,
         };
         if y + px(LINE * zoom) < canvas.top() || y >= canvas.bottom() {
@@ -158,5 +169,5 @@ pub(super) fn paint_code(
         );
         rows.push(row);
     }
-    (origin, rows)
+    (origin, first_row, rows)
 }

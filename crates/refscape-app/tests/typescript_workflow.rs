@@ -1,12 +1,14 @@
 //! Real TypeScript/React/React Native navigation through the composition root.
-use refscape_application::explorer::Explorer;
+#[path = "common/workflow.rs"]
+mod common;
+use common::Workflow;
 use refscape_language::LanguageBackend;
-use refscape_model::{ConnectionKind, Point, Position, ProjectLanguage, ProjectOptions};
+use refscape_model::{ConnectionKind, Point, Position, ProjectLanguage, ProjectOpenOptions};
 use refscape_storage::session::JsonSessionRepository;
 use std::{
     fs,
     path::Path,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[test]
@@ -16,12 +18,9 @@ fn react_native_canvas_navigation_context_and_session_restore() {
         .join("../../examples/typescript-demo")
         .canonicalize()
         .unwrap();
-    let mut explorer = Explorer::new(
-        LanguageBackend::default().with_timeout(Duration::from_secs(45)),
-        JsonSessionRepository,
-    );
+    let mut explorer = Workflow::new(LanguageBackend::default(), JsonSessionRepository);
     explorer
-        .open_project(&root, &ProjectOptions::default())
+        .open_project(&root, &ProjectOpenOptions::default())
         .unwrap();
     assert_eq!(
         explorer.session().project_options.language,
@@ -118,7 +117,7 @@ fn react_native_canvas_navigation_context_and_session_restore() {
         .unwrap()
         .source;
     assert_eq!(source.context.len(), 2);
-    assert!(!source.folded.is_empty());
+    assert!(!source.export_folded().is_empty());
     explorer.expand_context(&method, 1).unwrap();
     assert!(
         !explorer
@@ -128,7 +127,7 @@ fn react_native_canvas_navigation_context_and_session_restore() {
             .find(|card| card.id == method)
             .unwrap()
             .source
-            .expanded
+            .export_expanded()
             .is_empty()
     );
     explorer.session().validate().unwrap();
@@ -150,12 +149,9 @@ fn react_native_canvas_navigation_context_and_session_restore() {
     explorer.save_session(&session_path).unwrap();
     let saved = explorer.session().clone();
     drop(explorer);
-    let mut restored = Explorer::new(
-        LanguageBackend::default().with_timeout(Duration::from_secs(45)),
-        JsonSessionRepository,
-    );
+    let mut restored = Workflow::new(LanguageBackend::default(), JsonSessionRepository);
     restored
-        .load_project_session(&session_path, &root, &ProjectOptions::default())
+        .load_project_session(&session_path, &root, &ProjectOpenOptions::default())
         .unwrap();
     assert_eq!(restored.session(), &saved);
     restored.session().validate().unwrap();

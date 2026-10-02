@@ -1,12 +1,55 @@
-//! Render a real GPUI scene into a PNG for visual verification.
-//! cargo run -p refscape-app --example render --features visual-tests -- PROJECT OUTPUT [light] [variable] [unfold] [arrange] [--compile-commands PATH]
-use std::{env, path::PathBuf};
-
-use refscape_application::explorer::Explorer;
+//! Capture a real native GPUI scene after draw readiness.
+use refscape_application::{Command, HeadlessDriver, ViewEvent, WorkerExecutor};
 use refscape_language::LanguageBackend;
-use refscape_model::{Point, ProjectOptions, Theme};
+use refscape_model::{
+    CODE_CARD_HEADER, CODE_LINE_HEIGHT, ConnectionKind, Point, Position, ProjectOpenOptions, Theme,
+};
 use refscape_storage::session::JsonSessionRepository;
-
+use std::{env, path::PathBuf, sync::Arc};
+fn run(driver: &mut HeadlessDriver, command: Command) -> Vec<ViewEvent> {
+    let events = driver.dispatch(command);
+    if let Some(message) = events.iter().find_map(|event| match event {
+        ViewEvent::Status {
+            message,
+            error: true,
+        } => Some(message),
+        _ => None,
+    }) {
+        panic!("{message}");
+    }
+    events
+}
+fn navigate(
+    driver: &mut HeadlessDriver,
+    id: &str,
+    position: Position,
+    kind: ConnectionKind,
+    toggle: bool,
+) {
+    let card = driver
+        .controller
+        .snapshot()
+        .cards
+        .iter()
+        .find(|card| card.id == id)
+        .unwrap();
+    let anchor = Point::new(
+        card.width,
+        CODE_CARD_HEADER
+            + 8.
+            + card.source.display_anchor_row(position).unwrap_or(0) as f32 * CODE_LINE_HEIGHT,
+    );
+    run(
+        driver,
+        Command::Navigate {
+            card: id.into(),
+            position,
+            kind,
+            anchor,
+            toggle,
+        },
+    );
+}
 fn main() {
     let mut args = env::args_os().skip(1);
     let root = PathBuf::from(args.next().expect("PROJECT required"))
@@ -21,48 +64,79 @@ fn main() {
             PathBuf::from(
                 options
                     .get(index + 1)
-                    .expect("--compile-commands requires a path"),
+                    .expect("--compile-commands requires path"),
             )
         });
-    let variable = options.iter().any(|s| s == "variable");
-    let theme = if options.iter().any(|s| s == "light") {
+    let variable = options.iter().any(|arg| arg == "variable");
+    let theme = if options.iter().any(|arg| arg == "light") {
         Theme::light()
     } else {
         Theme::dark()
     };
-    let mut explorer = Explorer::new(LanguageBackend::default(), JsonSessionRepository);
-    explorer
-        .open_project(
-            &root,
-            &ProjectOptions {
+    let executor = Arc::new(WorkerExecutor::new(
+        Arc::new(LanguageBackend::default()),
+        Arc::new(JsonSessionRepository),
+    ));
+    let mut driver = HeadlessDriver::new(executor.clone());
+    // Capture never saves or restores a user's default project session.
+    let scratch = root.join(".refscape/session.json");
+    let events = run(
+        &mut driver,
+        Command::OpenLoaded {
+            loaded: refscape_application::ImportedSession {
+                snapshot: refscape_application::ApplicationSnapshot::new(root.clone()),
+            },
+            destination: scratch,
+            expected_root: Some(root.clone()),
+            overrides: ProjectOpenOptions {
                 compilation_database: database,
                 ..Default::default()
             },
-        )
+        },
+    );
+    run(&mut driver, Command::SetTheme(theme));
+    let files = events
+        .into_iter()
+        .find_map(|event| match event {
+            ViewEvent::Files(files) => Some(files),
+            _ => None,
+        })
         .unwrap();
-    explorer.set_theme(theme).unwrap();
-    // Document symbols are available without waiting for clangd's background index.
-    let main = explorer
-        .files()
-        .unwrap()
+    let main = files
         .into_iter()
         .find_map(|path| {
-            explorer
-                .symbols(&path)
-                .unwrap()
+            run(&mut driver, Command::Symbols(path))
                 .into_iter()
-                .find(|symbol| symbol.name == "main")
+                .find_map(|event| match event {
+                    ViewEvent::Symbols(symbols) => {
+                        symbols.into_iter().find(|symbol| symbol.name == "main")
+                    }
+                    _ => None,
+                })
         })
         .expect("project must define main");
     let main_path = main.path.clone();
-    let id = explorer.add_symbol(main, Point::new(30.0, 70.0)).unwrap();
-    let card = explorer
-        .session()
+    let id = run(
+        &mut driver,
+        Command::AddSymbol {
+            symbol: main,
+            position: Point::new(30., 70.),
+            toggle: false,
+        },
+    )
+    .into_iter()
+    .find_map(|event| match event {
+        ViewEvent::Canvas(outcome) => outcome.targets.into_iter().next(),
+        _ => None,
+    })
+    .unwrap();
+    let card = driver
+        .controller
+        .snapshot()
         .cards
         .iter()
         .find(|card| card.id == id)
         .unwrap();
-    // Select an actual semantic function token within main, just as clicking the code does.
     let call = card
         .source
         .tokens
@@ -71,17 +145,24 @@ fn main() {
             token.kind == if variable { "variable" } else { "function" }
                 && token.line > card.source.symbol.selection_range.start.line
         })
-        .map(|token| refscape_model::Position::new(token.line, token.start));
+        .map(|token| Position::new(token.line, token.start));
     if let Some(call) = call {
-        if variable {
-            explorer.toggle_type_definition(&id, call).unwrap();
-        } else {
-            explorer.expand_definition(&id, call).unwrap();
-        }
+        navigate(
+            &mut driver,
+            &id,
+            call,
+            if variable {
+                ConnectionKind::TypeDefinition
+            } else {
+                ConnectionKind::Definition
+            },
+            variable,
+        );
     }
-    if options.iter().any(|option| option == "arrange") && !variable {
-        let source = &explorer
-            .session()
+    if options.iter().any(|arg| arg == "arrange") && !variable {
+        let source = &driver
+            .controller
+            .snapshot()
             .cards
             .iter()
             .find(|card| card.id == id)
@@ -93,31 +174,50 @@ fn main() {
             .filter(|token| {
                 token.kind == "function" && token.line > source.symbol.selection_range.start.line
             })
-            .map(|token| refscape_model::Position::new(token.line, token.start))
+            .map(|token| Position::new(token.line, token.start))
             .collect();
         for position in calls {
-            explorer.expand_definition(&id, position).unwrap();
+            navigate(
+                &mut driver,
+                &id,
+                position,
+                ConnectionKind::Definition,
+                false,
+            );
         }
     }
-    if options.iter().any(|option| option == "unfold") {
-        let gaps: Vec<_> = explorer
-            .session()
+    if options.iter().any(|arg| arg == "unfold") {
+        let gaps: Vec<_> = driver
+            .controller
+            .snapshot()
             .cards
             .iter()
             .flat_map(|card| {
                 (0..card.source.context.len())
-                    .filter(|&index| card.source.folded_range(index).is_some())
-                    .map(|index| (card.id.clone(), index))
+                    .filter(|index| card.source.folded_range(*index).is_some())
+                    .map(|index| (card.id.to_string(), index))
             })
             .collect();
-        for (id, index) in gaps {
-            explorer.expand_context(&id, index).unwrap();
+        for (card, index) in gaps {
+            run(
+                &mut driver,
+                Command::ToggleFold {
+                    card,
+                    index,
+                    expand: true,
+                },
+            );
         }
     }
-    if options.iter().any(|option| option == "arrange") {
-        explorer.arrange_layout(Some(&id)).unwrap();
+    if options.iter().any(|arg| arg == "arrange") {
+        run(
+            &mut driver,
+            Command::Arrange {
+                selected: Some(id.clone()),
+            },
+        );
     }
-    let cards = &explorer.session().cards;
+    let cards = &driver.controller.snapshot().cards;
     let left = cards
         .iter()
         .map(|card| card.position.x)
@@ -134,24 +234,33 @@ fn main() {
         .iter()
         .map(|card| card.position.y + card.height)
         .fold(f32::NEG_INFINITY, f32::max);
-    let zoom = (1080.0 / (right - left))
-        .min(728.0 / (bottom - top))
-        .clamp(0.65, 1.0);
-    explorer.zoom(zoom, Point::default()).unwrap();
-    explorer
-        .pan(Point::new(40.0 - left * zoom, 50.0 - top * zoom))
-        .unwrap();
+    let zoom = (1080. / (right - left))
+        .min(728. / (bottom - top))
+        .clamp(0.65, 1.);
+    run(
+        &mut driver,
+        Command::Zoom {
+            factor: zoom,
+            anchor: Point::default(),
+        },
+    );
+    run(
+        &mut driver,
+        Command::Pan(Point::new(40. - left * zoom, 50. - top * zoom)),
+    );
     println!(
         "Rendering {} cards from {}",
-        explorer.session().cards.len(),
+        driver.controller.snapshot().cards.len(),
         main_path.display()
     );
+    let (controller, executor) = driver.into_parts();
     refscape_ui::runtime::render_snapshot(
-        explorer,
+        controller,
+        executor,
         root.join(".refscape/session.json"),
         output,
         if variable {
-            call.map(|call| (id, call))
+            call.map(|position| (id, position))
         } else {
             None
         },

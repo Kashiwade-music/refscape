@@ -4,24 +4,25 @@ use super::*;
 fn a_drop_during_a_read_request_waits_for_the_backend_and_commits_once(cx: &mut TestAppContext) {
     let (explorer, _) = fixture();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
     });
     cx.run_until_parked();
+    let before_geometry = view.read_with(cx, |view, _| view.controller.basis().geometry.0);
     view.update(cx, |view, cx| {
         view.search(cx);
-        let card = &view.session.cards[0];
+        let card = &view.controller.snapshot().cards[0];
         view.canvas.drag = Some(Drag::Card(
-            card.id.clone(),
+            card.id.to_string(),
             point(px(0.0), px(0.0)),
-            card.position,
+            card.position.point(),
         ));
         view.mouse_move(
             &MouseMoveEvent {
@@ -32,17 +33,21 @@ fn a_drop_during_a_read_request_waits_for_the_backend_and_commits_once(cx: &mut 
         );
         view.finish_drag(cx);
         assert!(view.requests.busy);
-        assert_eq!(view.session.cards[0].position, Point::new(100.0, 50.0));
+        assert_eq!(
+            view.controller.snapshot().cards[0].position,
+            Point::new(100.0, 50.0)
+        );
     });
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
         assert!(!view.requests.busy);
-        assert_eq!(view.session.cards[0].position, Point::new(200.0, 100.0));
-        assert!(view.layout.pending_drop.is_none());
         assert_eq!(
-            view.session.cards,
-            view.explorer.lock().unwrap().session().cards
+            view.controller.snapshot().cards[0].position,
+            Point::new(200.0, 100.0)
         );
+        assert!(view.canvas.drag_preview.is_none());
+        assert!(!view.controller.dragging());
+        assert_eq!(view.controller.basis().geometry.0, before_geometry + 1);
     });
 }
 
@@ -50,24 +55,28 @@ fn a_drop_during_a_read_request_waits_for_the_backend_and_commits_once(cx: &mut 
 fn asynchronous_failure_keeps_canvas_movement_and_pointer_zoom_anchor(cx: &mut TestAppContext) {
     let (explorer, _) = fixture();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             PathBuf::from("session.json"),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
     });
     cx.run_until_parked();
+
     view.update(cx, |view, cx| {
         view.search(cx);
         let anchor = Point::new(400.0, 200.0);
-        let before = view.session.viewport.screen_to_world(anchor);
+        let before = view.controller.snapshot().viewport.screen_to_world(anchor);
         view.zoom(1.5, anchor, cx);
-        assert_eq!(before, view.session.viewport.screen_to_world(anchor));
-        view.canvas.drag = Some(Drag::Pan(point(px(0.0), px(0.0))));
+        assert_eq!(
+            before,
+            view.controller.snapshot().viewport.screen_to_world(anchor)
+        );
+        view.canvas.drag = Some(Drag::Pan(MouseButton::Left, point(px(0.0), px(0.0))));
         view.mouse_move(
             &MouseMoveEvent {
                 position: point(px(35.0), px(60.0)),
@@ -76,7 +85,7 @@ fn asynchronous_failure_keeps_canvas_movement_and_pointer_zoom_anchor(cx: &mut T
             cx,
         );
         view.canvas.drag = Some(Drag::Card(
-            view.session.cards[0].id.clone(),
+            view.controller.snapshot().cards[0].id.to_string(),
             point(px(0.0), px(0.0)),
             Point::new(100.0, 50.0),
         ));
@@ -89,14 +98,20 @@ fn asynchronous_failure_keeps_canvas_movement_and_pointer_zoom_anchor(cx: &mut T
         );
     });
     let moved = view.read_with(cx, |view, _| {
-        (view.session.viewport, view.session.cards[0].position)
+        (
+            view.controller.snapshot().viewport,
+            view.controller.snapshot().cards[0].position,
+        )
     });
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
         assert!(view.requests.error);
         assert_eq!(view.requests.status, "simulated analyzer failure");
         assert_eq!(
-            (view.session.viewport, view.session.cards[0].position),
+            (
+                view.controller.snapshot().viewport,
+                view.controller.snapshot().cards[0].position
+            ),
             moved
         );
     });
@@ -109,12 +124,12 @@ fn portable_custom_theme_survives_cycle_and_close_waits_for_requests(cx: &mut Te
     custom.palette.accent = "#FF0000".into();
     explorer.set_theme(custom.clone()).unwrap();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             PathBuf::from("session.json"),
             vec![Theme::dark(), custom.clone()],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
@@ -122,18 +137,26 @@ fn portable_custom_theme_survives_cycle_and_close_waits_for_requests(cx: &mut Te
     cx.run_until_parked();
     view.update_in(cx, |view, window, cx| {
         assert_eq!(view.project.themes.len(), 3);
-        view.requests.busy = true;
+        view.search(cx);
         assert!(!view.close(window, cx));
         assert!(!view.requests.closing);
-        view.requests.busy = false;
+    });
+    cx.run_until_parked();
+    view.update(cx, |view, cx| {
         view.cycle_theme(cx);
     });
     cx.run_until_parked();
-    view.read_with(cx, |view, _| assert_eq!(view.session.theme, Theme::dark()));
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.controller.snapshot().theme, Theme::dark())
+    });
     view.update(cx, |view, cx| view.cycle_theme(cx));
     cx.run_until_parked();
-    view.read_with(cx, |view, _| assert_eq!(view.session.theme, Theme::light()));
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.controller.snapshot().theme, Theme::light())
+    });
     view.update(cx, |view, cx| view.cycle_theme(cx));
     cx.run_until_parked();
-    view.read_with(cx, |view, _| assert_eq!(view.session.theme, custom));
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.controller.snapshot().theme, custom)
+    });
 }

@@ -1,12 +1,14 @@
 //! Python navigation and canvas persistence through the composition root.
-use refscape_application::explorer::Explorer;
+#[path = "common/workflow.rs"]
+mod common;
+use common::Workflow;
 use refscape_language::LanguageBackend;
-use refscape_model::{ConnectionKind, Point, Position, ProjectLanguage, ProjectOptions};
+use refscape_model::{ConnectionKind, Point, Position, ProjectLanguage, ProjectOpenOptions};
 use refscape_storage::session::JsonSessionRepository;
 use std::{
     fs,
     path::Path,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 fn position(path: &Path, line_text: &str, token: &str) -> Position {
@@ -29,10 +31,10 @@ fn python_canvas_navigation_variable_types_context_and_session_restore() {
         .join("../../examples/python-demo")
         .canonicalize()
         .unwrap();
-    let backend = || LanguageBackend::default().with_timeout(Duration::from_secs(45));
-    let mut explorer = Explorer::new(backend(), JsonSessionRepository);
+    let backend = || LanguageBackend::default();
+    let mut explorer = Workflow::new(backend(), JsonSessionRepository);
     explorer
-        .open_project(&root, &ProjectOptions::default())
+        .open_project(&root, &ProjectOpenOptions::default())
         .unwrap();
     assert_eq!(
         explorer.session().project_options.language,
@@ -143,7 +145,7 @@ fn python_canvas_navigation_variable_types_context_and_session_restore() {
                 .any(|context| context.code.contains(container))
         );
         assert!(!card.source.tokens.is_empty());
-        assert!(!card.source.folded.is_empty());
+        assert!(!card.source.export_folded().is_empty());
         explorer.expand_context(&id, 0).unwrap();
         assert!(
             !explorer
@@ -153,7 +155,7 @@ fn python_canvas_navigation_variable_types_context_and_session_restore() {
                 .find(|card| card.id == id)
                 .unwrap()
                 .source
-                .expanded
+                .export_expanded()
                 .is_empty()
         );
     }
@@ -182,9 +184,9 @@ fn python_canvas_navigation_variable_types_context_and_session_restore() {
     explorer.save_session(&session_path).unwrap();
     let saved = explorer.session().clone();
     drop(explorer);
-    let mut restored = Explorer::new(backend(), JsonSessionRepository);
+    let mut restored = Workflow::new(backend(), JsonSessionRepository);
     restored
-        .load_project_session(&session_path, &root, &ProjectOptions::default())
+        .load_project_session(&session_path, &root, &ProjectOpenOptions::default())
         .unwrap();
     assert_eq!(restored.session(), &saved);
     restored.session().validate().unwrap();

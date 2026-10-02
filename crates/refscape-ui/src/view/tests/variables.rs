@@ -3,12 +3,12 @@ use super::*;
 fn variable_click_highlights_identity_and_toggles_type_at_any_glyph(cx: &mut TestAppContext) {
     let (explorer, requests, type_requests) = variable_fixture(true);
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
@@ -29,8 +29,8 @@ fn variable_click_highlights_identity_and_toggles_type_at_any_glyph(cx: &mut Tes
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
             assert!(!view.requests.error, "{}", view.requests.status);
-            assert_eq!(view.session.cards.len(), count);
-            let origin = &view.session.cards[0];
+            assert_eq!(view.controller.snapshot().cards.len(), count);
+            let origin = &view.controller.snapshot().cards[0];
             assert_eq!(
                 variable_highlight_spans(origin, 0, view.canvas.inspection.as_ref()),
                 vec!["日本😀".len().."日本😀call".len()]
@@ -41,17 +41,23 @@ fn variable_click_highlights_identity_and_toggles_type_at_any_glyph(cx: &mut Tes
             );
             if count == 2 {
                 assert_eq!(
-                    view.session.connections[0].kind,
+                    view.controller.snapshot().connections[0].kind,
                     ConnectionKind::TypeDefinition
                 );
-                assert_eq!(view.session.connections[0].source, Position::new(12, 9));
                 assert_eq!(
-                    card_title(&view.session, &view.session.cards[1]),
+                    view.controller.snapshot().connections[0].source,
+                    Position::new(12, 9)
+                );
+                assert_eq!(
+                    card_title(
+                        view.controller.snapshot(),
+                        &view.controller.snapshot().cards[1]
+                    ),
                     "call → Config"
                 );
                 assert!(
                     variable_highlight_spans(
-                        &view.session.cards[1],
+                        &view.controller.snapshot().cards[1],
                         0,
                         view.canvas.inspection.as_ref()
                     )
@@ -74,12 +80,12 @@ fn variable_click_highlights_identity_and_toggles_type_at_any_glyph(cx: &mut Tes
 fn primitive_variable_keeps_highlights_and_alt_click_opens_binding(cx: &mut TestAppContext) {
     let (explorer, requests, type_requests) = variable_fixture(false);
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
@@ -98,7 +104,7 @@ fn primitive_variable_keeps_highlights_and_alt_click_opens_binding(cx: &mut Test
     cx.simulate_mouse_down(click, MouseButton::Left, Modifiers::default());
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
-        assert_eq!(view.session.cards.len(), 1);
+        assert_eq!(view.controller.snapshot().cards.len(), 1);
         assert!(view.canvas.inspection.is_some());
         assert_eq!(
             view.canvas
@@ -123,8 +129,11 @@ fn primitive_variable_keeps_highlights_and_alt_click_opens_binding(cx: &mut Test
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
         assert!(view.canvas.inspection.is_none());
-        assert_eq!(view.session.cards.len(), 2);
-        assert_eq!(view.session.connections[0].kind, ConnectionKind::Definition);
+        assert_eq!(view.controller.snapshot().cards.len(), 2);
+        assert_eq!(
+            view.controller.snapshot().connections[0].kind,
+            ConnectionKind::Definition
+        );
     });
     assert_eq!(*requests.lock().unwrap(), vec![Position::new(12, 9); 2]);
 }
@@ -133,12 +142,12 @@ fn primitive_variable_keeps_highlights_and_alt_click_opens_binding(cx: &mut Test
 fn clearing_selection_during_analysis_does_not_restore_stale_highlights(cx: &mut TestAppContext) {
     let (explorer, _, _) = variable_fixture(false);
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )

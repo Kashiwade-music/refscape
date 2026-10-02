@@ -1,7 +1,5 @@
 use std::{env, path::Path, process::ExitCode};
-
-const USAGE: &str = "usage: cargo xtask gate";
-
+const USAGE: &str = "usage: cargo xtask gate|graph";
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -11,7 +9,6 @@ fn main() -> ExitCode {
         }
     }
 }
-
 fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let command = args.next();
@@ -20,9 +17,13 @@ fn run() -> Result<(), String> {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .ok_or("xtask must be located immediately below the repository root")?;
+        .ok_or("xtask must be immediately below repository root")?;
     match command.as_deref() {
         Some("gate") => xtask::gate(root),
+        Some("graph") => {
+            println!("{}", xtask::write_dependency_graph(root)?);
+            Ok(())
+        }
         Some("--help" | "-h") | None => {
             println!("{USAGE}");
             Ok(())

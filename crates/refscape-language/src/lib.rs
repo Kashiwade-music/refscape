@@ -1,79 +1,72 @@
-//! Selects and owns the active language backend.
-use refscape_application::ports::LanguageService;
+//! Static registry. Factory preparation never mutates a currently opened session.
+use refscape_analysis::{
+    AnalysisFactory, AnalysisResult, ErrorKind, OperationContext, PreparedProject, RefscapeError,
+};
 use refscape_language_cpp::Clangd;
-use refscape_language_python::Pyright;
+use refscape_language_python::Python;
 use refscape_language_rust::RustAnalyzer;
+pub use refscape_language_support::EnvironmentSnapshot;
+use refscape_language_support::resolver::ConfiguredExecutable;
 use refscape_language_typescript::TypeScript;
-use refscape_model::{
-    Position, ProjectCrate, ProjectLanguage, ProjectOptions, SourceDocument, SourceRange, Symbol,
-};
-use std::{
-    env,
-    path::{Path, PathBuf},
-    time::Duration,
-};
-
+use refscape_model::{ProjectLanguage, ProjectOpenOptions};
+use std::path::{Path, PathBuf};
+#[derive(Clone)]
 pub struct LanguageBackend {
-    rust_analyzer: PathBuf,
-    clangd: PathBuf,
-    typescript: PathBuf,
-    pyright: PathBuf,
-    timeout: Duration,
-    active: Option<Box<dyn LanguageService>>,
+    rust_analyzer: ConfiguredExecutable,
+    clangd: ConfiguredExecutable,
+    typescript: ConfiguredExecutable,
+    pyright: ConfiguredExecutable,
+    environment: EnvironmentSnapshot,
+    _runtime: refscape_language_support::process::RuntimeOwner,
 }
 impl Default for LanguageBackend {
     fn default() -> Self {
-        Self::new(
-            executable("REFSCAPE_RUST_ANALYZER", "rust-analyzer"),
-            executable("REFSCAPE_CLANGD", "clangd"),
-        )
+        Self::from_environment(EnvironmentSnapshot::capture())
     }
 }
-fn executable(variable: &str, fallback: &str) -> PathBuf {
-    env::var_os(variable)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| fallback.into())
-}
 impl LanguageBackend {
-    pub fn new(rust_analyzer: impl Into<PathBuf>, clangd: impl Into<PathBuf>) -> Self {
+    pub fn from_environment(environment: EnvironmentSnapshot) -> Self {
         Self {
-            rust_analyzer: rust_analyzer.into(),
-            clangd: clangd.into(),
-            typescript: executable(
+            rust_analyzer: environment
+                .configured_executable("REFSCAPE_RUST_ANALYZER", "rust-analyzer"),
+            clangd: environment.configured_executable("REFSCAPE_CLANGD", "clangd"),
+            typescript: environment.configured_executable(
                 "REFSCAPE_TYPESCRIPT_LANGUAGE_SERVER",
                 "typescript-language-server",
             ),
-            pyright: executable("REFSCAPE_PYRIGHT", "basedpyright-langserver"),
-            timeout: Duration::from_secs(120),
-            active: None,
+            pyright: environment
+                .configured_executable("REFSCAPE_PYRIGHT", "basedpyright-langserver"),
+            environment,
+            _runtime: refscape_language_support::process::RuntimeOwner::acquire(),
         }
     }
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+    pub fn new(rust_analyzer: impl Into<PathBuf>, clangd: impl Into<PathBuf>) -> Self {
+        Self {
+            rust_analyzer: ConfiguredExecutable::explicit(rust_analyzer),
+            clangd: ConfiguredExecutable::explicit(clangd),
+            ..Self::default()
+        }
+    }
+    pub fn with_rust_analyzer(mut self, executable: impl Into<PathBuf>) -> Self {
+        self.rust_analyzer = ConfiguredExecutable::explicit(executable);
+        self
+    }
+    pub fn with_clangd(mut self, executable: impl Into<PathBuf>) -> Self {
+        self.clangd = ConfiguredExecutable::explicit(executable);
         self
     }
     pub fn with_typescript_server(mut self, executable: impl Into<PathBuf>) -> Self {
-        self.typescript = executable.into();
+        self.typescript = ConfiguredExecutable::explicit(executable);
         self
     }
     pub fn with_pyright_server(mut self, executable: impl Into<PathBuf>) -> Self {
-        self.pyright = executable.into();
+        self.pyright = ConfiguredExecutable::explicit(executable);
         self
     }
-    fn session(&mut self) -> Result<&mut (dyn LanguageService + '_), String> {
-        match self.active.as_mut() {
-            Some(active) => Ok(active.as_mut()),
-            None => Err("open a project before requesting analysis".into()),
-        }
-    }
 }
-fn select_language(root: &Path, options: &ProjectOptions) -> Result<ProjectLanguage, String> {
+fn select_language(root: &Path, options: &ProjectOpenOptions) -> Result<ProjectLanguage, String> {
+    options.validate().map_err(|error| error.to_string())?;
     match options.language {
-        ProjectLanguage::Rust | ProjectLanguage::TypeScript | ProjectLanguage::Python
-            if options.compilation_database.is_some() =>
-        {
-            Err("A compilation database applies to C/C++; choose the C/C++ language".into())
-        }
         ProjectLanguage::Rust
         | ProjectLanguage::Cpp
         | ProjectLanguage::TypeScript
@@ -95,72 +88,103 @@ fn select_language(root: &Path, options: &ProjectOptions) -> Result<ProjectLangu
         )),
     }
 }
-impl LanguageService for LanguageBackend {
-    fn open_project(&mut self, root: &Path, options: &ProjectOptions) -> Result<(), String> {
-        let root = root
-            .canonicalize()
-            .map_err(|e| format!("cannot open {}: {e}", root.display()))?;
+
+impl AnalysisFactory for LanguageBackend {
+    fn prepare(
+        &self,
+        root: &Path,
+        options: &ProjectOpenOptions,
+        context: &OperationContext,
+    ) -> AnalysisResult<PreparedProject> {
+        context.check()?;
+        options.validate()?;
+        let root = root.canonicalize().map_err(|e| {
+            RefscapeError::new(
+                ErrorKind::Io,
+                format!("cannot open {}: {e}", root.display()),
+            )
+        })?;
         if !root.is_dir() {
-            return Err(format!("{} is not a source folder", root.display()));
+            return Err(RefscapeError::new(
+                ErrorKind::InvalidData,
+                format!("{} is not a source folder", root.display()),
+            ));
         }
-        let mut next: Box<dyn LanguageService> = match select_language(&root, options)? {
-            ProjectLanguage::Rust => {
-                Box::new(RustAnalyzer::new(&self.rust_analyzer).with_timeout(self.timeout))
-            }
-            ProjectLanguage::Cpp => Box::new(Clangd::new(&self.clangd).with_timeout(self.timeout)),
-            ProjectLanguage::TypeScript => {
-                Box::new(TypeScript::new(&self.typescript).with_timeout(self.timeout))
-            }
-            ProjectLanguage::Python => {
-                Box::new(Pyright::new(&self.pyright).with_timeout(self.timeout))
-            }
-            ProjectLanguage::Auto => unreachable!("selection always resolves automatic detection"),
+        let probe = if options.language == ProjectLanguage::Auto
+            && options.compilation_database.is_none()
+            && !refscape_language_rust::supports(&root)
+        {
+            Some(
+                refscape_language_support::catalog::ProjectProbe::scan_with_context(
+                    &root,
+                    &[
+                        refscape_language_typescript::FILE_POLICY,
+                        refscape_language_python::FILE_POLICY,
+                        {
+                            let mut policy = refscape_language_cpp::FILE_POLICY;
+                            policy.symlink_files = false;
+                            policy
+                        },
+                    ],
+                    context,
+                )?,
+            )
+        } else {
+            None
         };
-        next.open_project(&root, options)?;
-        self.active = Some(next);
-        Ok(())
-    }
-    fn project_options(&self) -> ProjectOptions {
-        self.active
-            .as_ref()
-            .map(|active| active.project_options())
-            .unwrap_or_default()
-    }
-    fn project_crates(&mut self) -> Result<Vec<ProjectCrate>, String> {
-        self.session()?.project_crates()
-    }
-    fn files(&mut self) -> Result<Vec<PathBuf>, String> {
-        self.session()?.files()
-    }
-    fn symbols(&mut self, path: &Path) -> Result<Vec<Symbol>, String> {
-        self.session()?.symbols(path)
-    }
-    fn source(&mut self, symbol: &Symbol) -> Result<SourceDocument, String> {
-        self.session()?.source(symbol)
-    }
-    fn definitions(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>, String> {
-        self.session()?.definitions(path, position)
-    }
-    fn references(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>, String> {
-        self.session()?.references(path, position)
-    }
-    fn type_definitions(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>, String> {
-        self.session()?.type_definitions(path, position)
-    }
-    fn document_highlights(
-        &mut self,
-        path: &Path,
-        position: Position,
-    ) -> Result<Vec<SourceRange>, String> {
-        self.session()?.document_highlights(path, position)
-    }
-    fn hover(&mut self, path: &Path, position: Position) -> Result<Option<String>, String> {
-        self.session()?.hover(path, position)
-    }
-    fn search(&mut self, query: &str) -> Result<Vec<Symbol>, String> {
-        self.session()?.search(query)
+        let language = if let Some(probe) = &probe {
+            if root.join("tsconfig.json").is_file()
+                || root.join("jsconfig.json").is_file()
+                || !probe.catalogs[0].is_empty()
+            {
+                ProjectLanguage::TypeScript
+            } else if root.join("pyrightconfig.json").is_file() || !probe.catalogs[1].is_empty() {
+                ProjectLanguage::Python
+            } else if !probe.catalogs[2].is_empty() || refscape_language_cpp::probe_markers(&root)?
+            {
+                ProjectLanguage::Cpp
+            } else {
+                return Err(RefscapeError::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "Cannot detect a Rust, C/C++, TypeScript/JavaScript, or Python project in {}. Select a source folder or choose its language explicitly",
+                        root.display()
+                    ),
+                ));
+            }
+        } else {
+            select_language(&root, options)
+                .map_err(|e| RefscapeError::new(ErrorKind::InvalidData, e))?
+        };
+        let resolved = refscape_model::ResolvedProjectOptions::try_from(ProjectOpenOptions {
+            language,
+            compilation_database: options.compilation_database.clone(),
+        })?;
+        let factory: Box<dyn AnalysisFactory> = match language {
+            ProjectLanguage::Rust => Box::new(RustAnalyzer::from_environment(
+                &self.rust_analyzer,
+                self.environment.clone(),
+            )),
+            ProjectLanguage::Cpp => Box::new(Clangd::from_environment(
+                &self.clangd,
+                self.environment.clone(),
+            )),
+            ProjectLanguage::TypeScript => Box::new(if let Some(probe) = &probe {
+                TypeScript::from_environment(&self.typescript, self.environment.clone())
+                    .with_discovery_files(probe.catalogs[0].clone())
+            } else {
+                TypeScript::from_environment(&self.typescript, self.environment.clone())
+            }),
+            ProjectLanguage::Python => Box::new(if let Some(probe) = &probe {
+                Python::from_environment(&self.pyright, self.environment.clone())
+                    .with_discovery_files(probe.catalogs[1].clone())
+            } else {
+                Python::from_environment(&self.pyright, self.environment.clone())
+            }),
+            ProjectLanguage::Auto => unreachable!("selection resolves automatic detection"),
+        };
+        factory.prepare(&root, &resolved.to_open_options(), context)
     }
 }
-
 #[cfg(test)]
 mod tests;

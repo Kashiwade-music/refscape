@@ -16,9 +16,19 @@ pub fn nearest_vacant_position(
     occupied: &[CardRect],
     rules: LayoutRules,
 ) -> Result<CardRect> {
-    nearest_vacant_position_bounded(position, width, height, min_x, None, occupied, rules)
+    nearest_vacant_position_cancellable(
+        position,
+        width,
+        height,
+        min_x,
+        None,
+        occupied,
+        rules,
+        &|| false,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn nearest_vacant_position_bounded(
     position: Point,
     width: f32,
@@ -28,6 +38,30 @@ pub(crate) fn nearest_vacant_position_bounded(
     occupied: &[CardRect],
     rules: LayoutRules,
 ) -> Result<CardRect> {
+    nearest_vacant_position_cancellable(
+        position,
+        width,
+        height,
+        min_x,
+        max_x,
+        occupied,
+        rules,
+        &|| false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn nearest_vacant_position_cancellable(
+    position: Point,
+    width: f32,
+    height: f32,
+    min_x: Option<f64>,
+    max_x: Option<f64>,
+    occupied: &[CardRect],
+    rules: LayoutRules,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CardRect> {
+    super::check_cancelled(cancelled)?;
     rules.validate()?;
     CardRect {
         position,
@@ -36,15 +70,18 @@ pub(crate) fn nearest_vacant_position_bounded(
     }
     .validate()?;
     if min_x.is_some_and(|x| !x.is_finite()) || max_x.is_some_and(|x| !x.is_finite()) {
-        return Err("Horizontal limits must be finite".into());
+        return Err(crate::invalid("Horizontal limits must be finite"));
     }
-    for rect in occupied {
+    for (index, rect) in occupied.iter().enumerate() {
+        if index % 64 == 0 {
+            super::check_cancelled(cancelled)?;
+        }
         rect.validate()?;
     }
     let minimum = min_x.unwrap_or(f64::NEG_INFINITY);
     let maximum = max_x.unwrap_or(f64::INFINITY);
     if minimum > maximum {
-        return Err("Inconsistent horizontal placement limits".into());
+        return Err(crate::invalid("Inconsistent horizontal placement limits"));
     }
     let desired_x = f64::from(position.x).max(minimum).min(maximum);
     let projected_x = representations(desired_x)
@@ -61,17 +98,16 @@ pub(crate) fn nearest_vacant_position_bounded(
             width,
             height,
         };
-        if rect.validate().is_ok()
-            && occupied
-                .iter()
-                .all(|other| !rect.overlaps_with(*other, rules))
-        {
+        if rect.validate().is_ok() && clear_of(rect, occupied, rules, cancelled)? {
             return Ok(rect);
         }
     }
     let mut xs = representations(desired_x);
     let mut forbidden = Vec::with_capacity(occupied.len());
-    for rect in occupied {
+    for (index, rect) in occupied.iter().enumerate() {
+        if index % 64 == 0 {
+            super::check_cancelled(cancelled)?;
+        }
         let gap = f64::from(rules.gap);
         let left = f64::from(rect.position.x) - f64::from(width) - gap;
         let right = rect.right() + gap;
@@ -83,6 +119,9 @@ pub(crate) fn nearest_vacant_position_bounded(
     }
     let x_boundary_count = xs.len();
     for index in 0..x_boundary_count {
+        if index % 64 == 0 {
+            super::check_cancelled(cancelled)?;
+        }
         let x = xs[index];
         if x.is_finite()
             && (CardRect {
@@ -110,20 +149,26 @@ pub(crate) fn nearest_vacant_position_bounded(
     let mut intervals = Vec::with_capacity(occupied.len());
     let mut merged: Vec<(f64, f64)> = Vec::with_capacity(occupied.len());
     for x in xs {
+        super::check_cancelled(cancelled)?;
         let dx = f64::from(x) - f64::from(position.x);
         if best.as_ref().is_some_and(|(_, rank)| dx * dx > rank.0) {
             continue;
         }
         intervals.clear();
-        intervals.extend(
-            forbidden
-                .iter()
-                .filter(|r| f64::from(x) > r.0 && f64::from(x) < r.1)
-                .map(|r| (r.2, r.3)),
-        );
+        for (index, r) in forbidden.iter().enumerate() {
+            if index % 64 == 0 {
+                super::check_cancelled(cancelled)?;
+            }
+            if f64::from(x) > r.0 && f64::from(x) < r.1 {
+                intervals.push((r.2, r.3));
+            }
+        }
         intervals.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
         merged.clear();
-        for &(top, bottom) in &intervals {
+        for (index, &(top, bottom)) in intervals.iter().enumerate() {
+            if index % 64 == 0 {
+                super::check_cancelled(cancelled)?;
+            }
             if let Some(last) = merged.last_mut()
                 && top < last.1
             {
@@ -146,6 +191,9 @@ pub(crate) fn nearest_vacant_position_bounded(
         let mut index = 0;
         let boundary_count = ys.len();
         while index < ys.len() {
+            if index % 64 == 0 {
+                super::check_cancelled(cancelled)?;
+            }
             let y = ys[index];
             index += 1;
             let rect = CardRect {
@@ -169,7 +217,10 @@ pub(crate) fn nearest_vacant_position_bounded(
             }
             let dy = f64::from(y) - f64::from(position.y);
             let rank = (
-                dx * dx + dy * dy,
+                {
+                    crate::instrumentation::candidate();
+                    dx * dx + dy * dy
+                },
                 dy.abs(),
                 dy < 0.0,
                 f64::from(x),
@@ -180,16 +231,32 @@ pub(crate) fn nearest_vacant_position_bounded(
             }
         }
         if let Some((rect, rank)) = local_best
-            && occupied
-                .iter()
-                .all(|other| !rect.overlaps_with(*other, rules))
+            && clear_of(rect, occupied, rules, cancelled)?
             && best.as_ref().is_none_or(|(_, old)| rank < *old)
         {
             best = Some((rect, rank));
         }
     }
+    super::check_cancelled(cancelled)?;
     best.map(|(rect, _)| rect)
-        .ok_or_else(|| "Cannot find a representable unoccupied card position".into())
+        .ok_or_else(|| crate::invalid("Cannot find a representable unoccupied card position"))
+}
+
+fn clear_of(
+    rect: CardRect,
+    occupied: &[CardRect],
+    rules: LayoutRules,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<bool> {
+    for (index, other) in occupied.iter().enumerate() {
+        if index % 64 == 0 {
+            super::check_cancelled(cancelled)?;
+        }
+        if rect.overlaps_with(*other, rules) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn representations(value: f64) -> Vec<f32> {

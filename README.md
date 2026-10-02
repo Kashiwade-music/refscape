@@ -301,8 +301,11 @@ Ctrl + SやSaveボタンで途中保存できる。
 保存は同じディレクトリの一時ファイルへの書き込み後に置き換え、
 不正なデータや未対応の保存形式バージョンはエラーとして扱う。
 自動復元に失敗した既存ファイルは終了時に上書きせず、Save asで別の保存先を選べる。
-セッションはソースのスナップショットを含む。外部でソースを変更した後は、
-該当カードを削除してファイルまたはシンボルを再配置し、最新の本文を読み直す。
+セッションはソースのスナップショットとファイル内容の識別情報を含む。
+復元時に現在のファイルと比較し、変更されたカードだけ最新の本文へ更新して折りたたみ状態をリセットする。
+開いているファイルは約1秒間隔でバックグラウンド確認し、外部で保存された変更も同じ方法で反映する。
+カードの位置・パン・ズームは保持し、サイズ変更で重複した場合のみ配置を修復する。
+更新されたカードの古い位置を指す接続線とホバーは破棄する。削除されたファイル・シンボルのカードも取り除く。
 
 ライトとダークの組み込みテーマに加え、カスタムテーマを読み込める。
 
@@ -337,7 +340,7 @@ GPUIが使う描画バックエンドに対応したGPUドライバーが必要�
 
 ## 開発
 
-製品は12 crateのCargo workspaceで構成し、開発用の `xtask` は独立したworkspaceとする。
+製品は14 crateのCargo workspaceで構成し、開発用の `xtask` は独立したworkspaceとする。
 共通LSP処理とCanvas配置を独立させ、Rust、C/C++、TypeScript/JavaScript、Pythonの解析はそれぞれの言語crateが実装する。
 今後の言語も専用crateを追加し、選択層へ登録する。言語crate同士の依存と、全種類の内部依存の循環を禁止する。
 各crateの責務・依存方向・検査ルールは [アーキテクチャ](docs/architecture.md) を参照。
@@ -348,8 +351,11 @@ GPUIが使う描画バックエンドに対応したGPUドライバーが必要�
 Rust toolchainは `rust-toolchain.toml` に固定している。リポジトリのルートで次を実行する。
 
 ```sh
-# 構造検査、依存グラフの自動生成・更新、format、clippy、test
+# 構造検査、生成依存図のcheck、format、clippy、test
 cargo xtask gate
+
+# manifest変更後の依存図更新
+cargo xtask graph
 
 # 起動
 cargo run --locked
@@ -380,7 +386,7 @@ cargo test -p refscape-language --locked --test backends -- --ignored
 cargo run --locked -- --check "C:\code\my-project"
 ```
 
-`cargo xtask gate` が構造検査に成功すると、`docs/dependency-graph.md` を自動生成・更新する。
+`cargo xtask graph` が `docs/dependency-graph.md` を更新し、`cargo xtask gate` はその一致を検査する。
 実サーバーのテストは外部の `rust-analyzer` / `clangd` / `typescript-language-server` / `basedpyright-langserver` が必要なため通常はignoreされる。
 
 実GPUによる描画確認用のexampleも用意する。`main` を持つプロジェクトで、

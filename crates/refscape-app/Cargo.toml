@@ -17,6 +17,7 @@ name = "render"
 required-features = ["visual-tests"]
 
 [dependencies]
+refscape-analysis.workspace = true
 refscape-application.workspace = true
 refscape-language.workspace = true
 refscape-model.workspace = true

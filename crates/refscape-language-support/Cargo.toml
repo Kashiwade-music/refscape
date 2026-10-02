@@ -1,0 +1,19 @@
+[package]
+name = "refscape-language-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "refscape-language-fixture"
+path = "../refscape-lsp/src/bin/refscape-lsp-fixture.rs"
+
+[dependencies]
+refscape-model.workspace = true
+refscape-analysis.workspace = true
+refscape-lsp.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

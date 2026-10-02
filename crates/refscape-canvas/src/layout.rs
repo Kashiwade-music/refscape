@@ -1,78 +1,92 @@
-//! Transactional card placement in world coordinates.
-
+//! Pure placement planners over precomputed geometry, independent of source text.
 mod geometry;
 mod nearest;
+mod operation;
 mod repair;
 #[cfg(test)]
 mod tests;
 mod tree;
-
+use crate::Result;
+pub use crate::metrics::{source_anchor_y, source_dimensions};
 pub use geometry::{CardRect, LayoutRules, validate_layout};
 pub use nearest::nearest_vacant_position;
-pub use repair::{plan_resize, plan_restore_repair};
-pub use tree::{plan_tree_arrangement, plan_tree_arrangement_cancellable};
-
-use crate::Result;
-use refscape_model::{
-    CODE_CARD_HEADER, CODE_LINE_HEIGHT, CODE_REGION_HEADER, CODE_REGION_PADDING, CodeCard, Point,
-    Position, SourceDocument,
+pub use operation::{
+    LayoutError, nearest_vacant_position_with_context, plan_arrange, plan_resize_with_context,
+    plan_restore_repair_with_context, validate_layout_with_context,
 };
-
-pub const CARD_GAP: f32 = CODE_REGION_HEADER + CODE_REGION_PADDING + 16.0;
+use refscape_model::{CardId, CodeCard, Connection, Position, WorldPoint, WorldSize};
+pub use repair::{plan_resize, plan_restore_repair};
+use std::path::PathBuf;
+pub use tree::plan_tree_arrangement;
+pub const CARD_GAP: f32 = 74.0;
 pub const CARD_RIGHT_GAP: f32 = 100.0;
-
-pub fn source_anchor_y(card: &CodeCard, position: Position) -> f32 {
-    card.position.y
-        + CODE_CARD_HEADER
-        + 8.0
-        + card.source.display_anchor_row(position).unwrap_or(0) as f32 * CODE_LINE_HEIGHT
+/// Exact target ordering policy, detached from the source snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeOrderKey {
+    pub path: PathBuf,
+    pub range_start: Position,
+    pub range_end: Position,
+    pub symbol_id: String,
 }
-
-pub fn source_dimensions(source: &SourceDocument) -> (f32, f32) {
-    let longest = source
-        .display_lines()
-        .iter()
-        .map(|line| {
-            line.text
-                .chars()
-                .map(|character| {
-                    if character == '\t' {
-                        4
-                    } else if character.is_ascii() {
-                        1
-                    } else {
-                        2
-                    }
-                })
-                .sum::<usize>()
+/// A saved-order node containing only geometry and stable ordering metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutCard {
+    pub id: CardId,
+    pub position: WorldPoint,
+    pub size: WorldSize,
+    pub order: NodeOrderKey,
+}
+impl LayoutCard {
+    pub fn validate_geometry(&self) -> Result<()> {
+        CardRect::from(self).validate()
+    }
+}
+impl TryFrom<&CodeCard> for LayoutCard {
+    type Error = refscape_model::RefscapeError;
+    fn try_from(card: &CodeCard) -> Result<Self> {
+        card.validate_geometry()
+            .map_err(|error| crate::invalid(&error))?;
+        let symbol = &card.source.symbol;
+        Ok(Self {
+            id: card.id.clone(),
+            position: card.position,
+            size: WorldSize::new(card.width, card.display_height())?,
+            order: NodeOrderKey {
+                path: symbol.path.clone(),
+                range_start: symbol.range.start,
+                range_end: symbol.range.end,
+                symbol_id: symbol.id.clone(),
+            },
         })
-        .max()
-        .unwrap_or(0);
-    (
-        (longest as f32 * 8.0 + source.code_gutter_width() + 20.0).max(520.0),
-        CodeCard::source_height(source),
-    )
+    }
 }
-
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutInput {
+    pub cards: Vec<LayoutCard>,
+    pub connections: Vec<Connection>,
+}
 #[derive(Debug, Clone, PartialEq)]
 pub struct PositionChange {
-    pub id: String,
-    pub before: Point,
-    pub after: Point,
+    pub id: CardId,
+    pub before: WorldPoint,
+    pub after: WorldPoint,
 }
-
+/// Candidate geometry delta; application alone commits it after basis validation.
 #[derive(Debug, Clone, PartialEq)]
-pub struct LayoutPlan {
+pub struct LayoutDelta {
     pub changes: Vec<PositionChange>,
 }
-
-impl LayoutPlan {
-    pub(crate) fn between(
-        before: &[CodeCard],
-        after: &[CodeCard],
+impl LayoutDelta {
+    pub(crate) fn between_cancellable(
+        before: &[LayoutCard],
+        after: &[LayoutCard],
         rules: LayoutRules,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Self> {
-        validate_layout(after, rules)?;
+        if before.len() != after.len() || before.iter().zip(after).any(|(a, b)| a.id != b.id) {
+            return Err(crate::invalid("Layout node set changed while planning"));
+        }
+        geometry::validate_layout_cancellable(after, rules, cancelled)?;
         Ok(Self {
             changes: before
                 .iter()
@@ -86,25 +100,15 @@ impl LayoutPlan {
                 .collect(),
         })
     }
+}
 
-    /// Verify the snapshot and the complete result before committing any positions.
-    /// Resize callers first prepare the new source and dimensions in a private snapshot.
-    pub fn apply_positions(&self, cards: &mut [CodeCard], rules: LayoutRules) -> Result<()> {
-        let mut candidate = cards.to_vec();
-        for change in &self.changes {
-            let card = candidate
-                .iter_mut()
-                .find(|card| card.id == change.id)
-                .ok_or("Layout card no longer exists")?;
-            if card.position != change.before {
-                return Err("Layout snapshot is stale".into());
-            }
-            card.position = change.after;
-        }
-        validate_layout(&candidate, rules)?;
-        for (card, candidate) in cards.iter_mut().zip(candidate) {
-            card.position = candidate.position;
-        }
-        Ok(())
+pub(crate) fn check_cancelled(cancelled: &dyn Fn() -> bool) -> Result<()> {
+    crate::instrumentation::checkpoint();
+    if cancelled() {
+        return Err(refscape_model::RefscapeError::new(
+            refscape_model::ErrorKind::Cancelled,
+            "Layout calculation cancelled",
+        ));
     }
+    Ok(())
 }

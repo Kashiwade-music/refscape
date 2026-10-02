@@ -1,174 +1,165 @@
+//! Completion ordering regressions traverse the public controller/effect boundary.
 use super::layout::connected_explorer;
 use super::*;
-use crate::view::layout::Placement;
-use std::sync::atomic::{AtomicBool, Ordering};
+use refscape_application::{Completion, Effect, Transition};
+use refscape_model::ErrorKind;
+
+fn finish(fixture: &mut FixtureDriver, transition: Transition) {
+    let mut pending: std::collections::VecDeque<_> = transition.effects.into();
+    while let Some(effect) = pending.pop_front() {
+        let completion = fixture.driver.executor.execute(effect);
+        let next = fixture.driver.controller.complete(completion);
+        pending.extend(next.effects);
+    }
+}
 
 #[test]
-fn a_cancelled_worker_waiting_for_the_explorer_cannot_restore_old_geometry() {
-    let shared = Arc::new(Mutex::new(connected_explorer()));
-    let cancel = Arc::new(AtomicBool::new(false));
-    let mut owner = shared.lock().unwrap();
-    let old = owner.session().clone();
-    let old_generation = owner.generation();
-    let worker_explorer = shared.clone();
-    let worker_cancel = cancel.clone();
+fn a_cancelled_worker_with_an_old_snapshot_cannot_restore_new_geometry() {
+    let mut fixture = connected_explorer();
+    let old = fixture.snapshot().clone();
+    let old_basis = fixture.driver.controller.basis();
+    let transition = fixture
+        .driver
+        .controller
+        .dispatch(Command::Arrange { selected: None });
+    let effect = transition
+        .effects
+        .into_iter()
+        .find(|effect| matches!(effect, Effect::PlanCanvas { .. }))
+        .unwrap();
+    let (context, basis, edit, interaction) = match &effect {
+        Effect::PlanCanvas {
+            context,
+            basis,
+            edit,
+            interaction,
+            ..
+        } => (context.clone(), *basis, edit.clone(), *interaction),
+        _ => unreachable!(),
+    };
+    let executor = fixture.driver.executor.clone();
     let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         started_tx.send(()).unwrap();
-        crate::view::layout::capture_layout_snapshot(&worker_explorer, &worker_cancel)
+        release_rx.recv().unwrap();
+        executor.execute(effect)
     });
     started_rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .unwrap();
-    // A newer confirmed operation finishes before the waiting worker gets the lock.
-    owner
+    // Cancellation frees the owner to accept newer intent while a worker still owns its old input.
+    context.cancel.cancel();
+    let cancelled = fixture
+        .driver
+        .controller
+        .complete(Completion::CanvasPlanned {
+            context: context.clone(),
+            basis,
+            edit,
+            interaction,
+            result: Err(refscape_model::RefscapeError::new(
+                ErrorKind::Cancelled,
+                "Layout calculation cancelled",
+            )),
+        });
+    finish(&mut fixture, cancelled);
+    fixture
         .move_card(&old.cards[1].id, Point::new(6000.0, 50.0))
         .unwrap();
-    owner.pan(Point::new(40.0, 20.0)).unwrap();
-    let confirmed = owner.session().clone();
-    let generation = owner.generation();
+    fixture.pan(Point::new(40.0, 20.0)).unwrap();
+    let confirmed = fixture.snapshot().clone();
+    let basis = fixture.driver.controller.basis();
     assert_ne!(confirmed, old);
-    assert_ne!(generation, old_generation);
-    cancel.store(true, Ordering::Relaxed);
-    drop(owner);
-    let result = worker.join().unwrap();
-    assert!(matches!(result, Err(error) if error.contains("cancelled")));
-    let explorer = shared.lock().unwrap();
-    assert_eq!(explorer.session(), &confirmed);
-    assert_eq!(explorer.generation(), generation);
+    assert_ne!(basis, old_basis);
+    release_tx.send(()).unwrap();
+    let completion = worker.join().unwrap();
+    assert!(
+        matches!(&completion,Completion::CanvasPlanned{result:Err(error),..} if error.kind==ErrorKind::Cancelled)
+    );
+    let duplicate = fixture.driver.controller.complete(completion);
+    finish(&mut fixture, duplicate);
+    assert_eq!(fixture.snapshot(), &confirmed);
+    assert_eq!(fixture.driver.controller.basis(), basis);
 }
 
-#[gpui::test]
-fn prepared_placement_waits_for_a_read_only_explorer_lock(cx: &mut TestAppContext) {
-    let (explorer, _) = fixture();
-    let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
-            explorer,
-            "session.json".into(),
-            vec![],
-            None,
-            ProjectOptions::default(),
-            window,
-            cx,
-        )
+#[test]
+fn prepared_placement_commits_from_its_owned_input_while_hover_answer_is_pending() {
+    let (mut fixture, _) = fixture();
+    let before = fixture.snapshot().cards.clone();
+    let hover = fixture.driver.controller.dispatch(Command::Hover {
+        card: before[0].id.to_string(),
+        position: Position::new(12, 9),
     });
-    cx.run_until_parked();
-    let (shared, prepared, commit, before) = view.read_with(cx, |view, _| {
-        let mut explorer = view.explorer.lock().unwrap();
-        let range = explorer.session().cards[0].source.symbol.range;
-        let prepared = explorer
-            .prepare_add_symbol(
-                Symbol::file("target.rs".into(), range),
-                Point::new(800.0, 50.0),
-            )
-            .unwrap();
-        let commit = explorer.plan_prepared(prepared.clone()).unwrap();
-        (
-            view.explorer.clone(),
-            prepared,
-            commit,
-            view.session.cards.clone(),
-        )
+    assert_eq!(hover.effects.len(), 1);
+    let range = before[0].source.symbol.range;
+    let query = fixture.driver.controller.dispatch(Command::AddSymbol {
+        symbol: Symbol::file("target.rs".into(), range),
+        position: Point::new(800.0, 50.0),
+        toggle: false,
     });
-    // Read-only hover holds the same exclusive guard while the backend answers.
-    let reader = shared.lock().unwrap();
-    view.update(cx, |view, cx| {
-        view.requests.busy = true;
-        view.layout.pending_output = Some(Output {
-            prepared: Some(prepared),
-            ..Default::default()
-        });
-        view.complete_placement(
-            Ok(commit),
-            Placement::Edit(Box::new(
-                view.layout
-                    .pending_output
-                    .as_ref()
-                    .unwrap()
-                    .prepared
-                    .clone()
-                    .unwrap(),
-            )),
-            cx,
-        );
-        assert_eq!(view.session.cards, before);
-        assert!(view.layout.pending_output.is_some());
-        assert!(view.layout.planning);
-        assert!(!view.requests.error);
-    });
-    cx.run_until_parked();
-    drop(reader);
-    cx.background_executor
-        .advance_clock(std::time::Duration::from_millis(10));
-    cx.run_until_parked();
-    view.read_with(cx, |view, _| {
-        assert_eq!(view.session.cards.len(), 2);
-        assert_eq!(view.session.cards[0], before[0]);
-        assert_eq!(view.session.cards[1].position, Point::new(800.0, 50.0));
-        assert!(!view.requests.busy);
-        assert!(!view.requests.error, "{}", view.requests.status);
-        assert!(view.layout.pending_output.is_none());
-        assert_eq!(
-            view.session.cards,
-            view.explorer.lock().unwrap().session().cards
-        );
-    });
+    let source_completion = fixture
+        .driver
+        .executor
+        .execute(query.effects.into_iter().next().unwrap());
+    let plan = fixture.driver.controller.complete(source_completion);
+    assert_eq!(fixture.snapshot().cards, before);
+    assert!(fixture.driver.controller.busy());
+    finish(&mut fixture, plan);
+    assert_eq!(fixture.snapshot().cards.len(), 2);
+    assert_eq!(fixture.snapshot().cards[0], before[0]);
+    assert_eq!(
+        fixture.snapshot().cards[1].position,
+        Point::new(800.0, 50.0)
+    );
+    assert!(!fixture.driver.controller.busy());
+    assert!(
+        !fixture.driver.controller.error(),
+        "{}",
+        fixture.driver.controller.status()
+    );
+    let confirmed = fixture.snapshot().clone();
+    finish(&mut fixture, hover);
+    assert_eq!(
+        fixture.snapshot(),
+        &confirmed,
+        "a read-only completion cannot overwrite a canvas commit"
+    );
 }
 
-#[gpui::test]
-fn manual_tree_arrangement_waits_for_a_read_only_explorer_lock(cx: &mut TestAppContext) {
-    let explorer = connected_explorer();
-    let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
-            explorer,
-            "session.json".into(),
-            vec![],
-            None,
-            ProjectOptions::default(),
-            window,
-            cx,
-        )
+#[test]
+fn manual_tree_arrangement_keeps_camera_and_fixed_cards_with_hover_answer_pending() {
+    let mut fixture = connected_explorer();
+    let before = fixture.snapshot().cards.clone();
+    let hover = fixture.driver.controller.dispatch(Command::Hover {
+        card: before[0].id.to_string(),
+        position: Position::new(12, 9),
     });
-    cx.run_until_parked();
-    let (shared, commit, before) = view.read_with(cx, |view, _| {
-        let explorer = view.explorer.lock().unwrap();
-        let commit = explorer.plan_layout(None).unwrap();
-        assert!(
-            commit.changed,
-            "the connected fixture must require tree arrangement"
-        );
-        (view.explorer.clone(), commit, view.session.cards.clone())
-    });
-    let reader = shared.lock().unwrap();
-    view.update(cx, |view, cx| {
-        view.requests.busy = true;
-        view.layout.planning = true;
-        view.complete_layout(
-            Ok(commit),
-            view.layout.session_epoch,
-            view.layout.revision,
-            cx,
-        );
-        assert_eq!(view.session.cards, before);
-        assert!(view.requests.busy);
-        assert!(view.layout.planning);
-        assert!(!view.requests.error);
-    });
-    cx.run_until_parked();
-    drop(reader);
-    cx.background_executor
-        .advance_clock(std::time::Duration::from_millis(10));
-    cx.run_until_parked();
-    view.read_with(cx, |view, _| {
-        assert_ne!(view.session.cards, before);
-        assert_eq!(view.session.cards[0], before[0]);
-        assert_eq!(view.session.cards[3], before[3]);
-        assert!(!view.requests.busy);
-        assert!(view.layout.can_undo);
-        assert!(!view.requests.error);
-        assert_eq!(
-            view.session.cards,
-            view.explorer.lock().unwrap().session().cards
-        );
-    });
+    assert_eq!(hover.effects.len(), 1);
+    let arrange = fixture
+        .driver
+        .controller
+        .dispatch(Command::Arrange { selected: None });
+    assert!(
+        !arrange.effects.is_empty(),
+        "connected fixture must require tree arrangement"
+    );
+    assert_eq!(
+        fixture.snapshot().cards,
+        before,
+        "planning does not mutate the owner"
+    );
+    fixture.pan(Point::new(40.0, 20.0)).unwrap();
+    let viewport = fixture.snapshot().viewport;
+    finish(&mut fixture, arrange);
+    assert_ne!(fixture.snapshot().cards, before);
+    assert_eq!(fixture.snapshot().cards[0], before[0]);
+    assert_eq!(fixture.snapshot().cards[3], before[3]);
+    assert_eq!(fixture.snapshot().viewport, viewport);
+    assert!(fixture.driver.controller.can_undo_layout());
+    assert!(!fixture.driver.controller.busy());
+    assert!(!fixture.driver.controller.error());
+    let confirmed = fixture.snapshot().clone();
+    finish(&mut fixture, hover);
+    assert_eq!(fixture.snapshot(), &confirmed);
 }

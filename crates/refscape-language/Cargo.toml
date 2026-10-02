@@ -6,7 +6,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-refscape-application.workspace = true
+refscape-analysis.workspace = true
+refscape-language-support.workspace = true
 refscape-model.workspace = true
 refscape-language-rust.workspace = true
 refscape-language-cpp.workspace = true

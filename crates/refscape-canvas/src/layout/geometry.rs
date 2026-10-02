@@ -1,6 +1,7 @@
+use super::LayoutCard;
 use super::{CARD_GAP, CARD_RIGHT_GAP};
 use crate::Result;
-use refscape_model::{CodeCard, Point};
+use refscape_model::Point;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayoutRules {
@@ -24,7 +25,7 @@ impl LayoutRules {
             || self.gap < 0.0
             || self.right_gap < 0.0
         {
-            return Err("Layout gaps must be finite and nonnegative".into());
+            return Err(crate::invalid("Layout gaps must be finite and nonnegative"));
         }
         Ok(())
     }
@@ -37,12 +38,12 @@ pub struct CardRect {
     pub height: f32,
 }
 
-impl From<&CodeCard> for CardRect {
-    fn from(card: &CodeCard) -> Self {
+impl From<&LayoutCard> for CardRect {
+    fn from(card: &LayoutCard) -> Self {
         Self {
-            position: card.position,
-            width: card.width,
-            height: card.display_height(),
+            position: card.position.point(),
+            width: card.size.width(),
+            height: card.size.height(),
         }
     }
 }
@@ -53,6 +54,7 @@ impl CardRect {
     }
 
     pub fn overlaps_with(self, other: Self, rules: LayoutRules) -> bool {
+        crate::instrumentation::overlap();
         let gap = f64::from(rules.gap);
         f64::from(self.position.x) < other.right() + gap
             && self.right() + gap > f64::from(other.position.x)
@@ -71,7 +73,9 @@ impl CardRect {
             || self.position.x + self.width <= self.position.x
             || self.position.y + self.height <= self.position.y
         {
-            return Err("Card placement exceeds finite canvas limits".into());
+            return Err(crate::invalid(
+                "Card placement exceeds finite canvas limits",
+            ));
         }
         Ok(())
     }
@@ -84,21 +88,35 @@ impl CardRect {
     }
 }
 
-pub fn validate_layout(cards: &[CodeCard], rules: LayoutRules) -> Result<()> {
+pub fn validate_layout(cards: &[LayoutCard], rules: LayoutRules) -> Result<()> {
+    validate_layout_cancellable(cards, rules, &|| false)
+}
+
+pub(crate) fn validate_layout_cancellable(
+    cards: &[LayoutCard],
+    rules: LayoutRules,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<()> {
     rules.validate()?;
     let mut ids = std::collections::BTreeSet::new();
     for (index, card) in cards.iter().enumerate() {
+        super::check_cancelled(cancelled)?;
         card.validate_geometry()?;
         let rect = CardRect::from(card);
         rect.validate()?;
         if !ids.insert(&card.id) {
-            return Err("Duplicate card ID in layout".into());
+            return Err(crate::invalid("Duplicate card ID in layout"));
         }
-        if cards[..index]
-            .iter()
-            .any(|other| rect.overlaps_with(CardRect::from(other), rules))
-        {
-            return Err("Cards overlap or violate the required gap".into());
+        if card.id.is_empty() {
+            return Err(crate::invalid("Layout card ID must be nonempty"));
+        }
+        for (offset, other) in cards[..index].iter().enumerate() {
+            if offset % 64 == 0 {
+                super::check_cancelled(cancelled)?;
+            }
+            if rect.overlaps_with(CardRect::from(other), rules) {
+                return Err(crate::invalid("Cards overlap or violate the required gap"));
+            }
         }
     }
     Ok(())

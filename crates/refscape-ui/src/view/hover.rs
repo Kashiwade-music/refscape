@@ -1,4 +1,6 @@
-use super::*;
+use super::{Command, ExplorerView, LINE, Transition, color, connected_word};
+use gpui::{Context, KeyDownEvent, MouseButton, Pixels, div, point, prelude::*, px};
+use refscape_model::Position;
 use std::time::Duration;
 
 #[derive(Clone, PartialEq)]
@@ -8,11 +10,16 @@ pub(super) struct HoverTarget {
     anchor: gpui::Point<Pixels>,
 }
 
-impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<L, R> {
+impl ExplorerView {
+    fn transition_hover_cancel(&mut self, transition: Transition, cx: &mut Context<Self>) {
+        self.transition(transition, cx);
+    }
     pub(super) fn clear_hover(&mut self, cx: &mut Context<Self>) {
         if self.canvas.context_hover.take().is_some() {
             cx.notify();
         }
+        let transition = self.controller.dispatch(Command::CancelHover);
+        self.transition_hover_cancel(transition, cx);
         self.hover.task = None;
         self.hover.dismiss_task = None;
         self.hover.pending_target = None;
@@ -51,16 +58,13 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
     }
 
     fn hover_at(&self, mouse: gpui::Point<Pixels>) -> Option<HoverTarget> {
-        let zoom = self.session.viewport.zoom;
+        let zoom = self.controller.snapshot().viewport.zoom;
         if zoom < 0.65 || !self.canvas.bounds.contains(&mouse) {
             return None;
         }
-        let painted = self
-            .canvas
-            .painted
-            .iter()
-            .rev()
-            .find(|card| card.bounds.contains(&mouse))?;
+        let painted = self.canvas.painted.iter().rev().find(|card| {
+            card.current(self.controller.snapshot()) && card.bounds.contains(&mouse)
+        })?;
         if mouse.y < painted.origin.y {
             return None;
         }
@@ -68,17 +72,14 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
         if mouse.x < painted.origin.x {
             return None;
         }
-        let source_row = painted.rows.get(row)?;
+        let source_row = painted.row(row)?;
         let line = &source_row.code;
-        let byte = line.index_for_x(mouse.x - painted.origin.x)?;
         let source_position = source_row.position?;
         let first_character = source_position.character;
-        let position = Position::new(
-            source_position.line,
-            first_character + line.text[..byte].encode_utf16().count() as u32,
-        );
+        let position = source_row.source_position(mouse.x - painted.origin.x)?;
         let card = self
-            .session
+            .controller
+            .snapshot()
             .cards
             .iter()
             .find(|card| card.id == painted.id)?;
@@ -131,42 +132,30 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
 
     fn request_hover(&mut self, target: HoverTarget, cx: &mut Context<Self>) {
         self.hover.target = Some(target.clone());
-        let explorer = self.explorer.clone();
         self.hover.task = Some(cx.spawn(async move |view, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(400))
                 .await;
-            let request = target.clone();
-            // Hover is read-only and never queues behind project loading or navigation.
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    match explorer.try_lock() {
-                        Ok(mut explorer) => explorer.hover(&request.card_id, request.position),
-                        Err(_) => Ok(None),
-                    }
-                })
-                .await;
             let _ = view.update(cx, |view, cx| {
-                if view.hover.target.as_ref() != Some(&target)
-                    || view.requests.busy
-                    || view.requests.closing
+                if view.hover.target.as_ref() == Some(&target)
+                    && !view.controller.busy()
+                    && !view.controller.closing()
                 {
-                    return;
+                    view.command(
+                        Command::Hover {
+                            card: target.card_id,
+                            position: target.position,
+                        },
+                        cx,
+                    );
                 }
-                view.hover.text = match result {
-                    Ok(text) => text.filter(|text| !text.trim().is_empty()),
-                    Err(error) => Some(format!("Hover information unavailable: {error}")),
-                };
-                cx.notify();
             });
         }));
     }
-
     pub(super) fn hover_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let target = self.hover.target.as_ref()?;
         let text = self.hover.text.as_ref()?;
-        let palette = &self.session.theme.palette;
+        let palette = &self.controller.snapshot().theme.palette;
         let width = (f32::from(self.canvas.bounds.size.width) - 24.0).clamp(1.0, 460.0);
         let height = (f32::from(self.canvas.bounds.size.height) - 24.0).clamp(1.0, 320.0);
         let left = f32::from(target.anchor.x - self.canvas.bounds.left()).clamp(

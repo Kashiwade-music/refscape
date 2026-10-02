@@ -1,45 +1,42 @@
 use super::*;
-use refscape_model::{ConnectionKind, Position, SourceDocument, SourceRange, Symbol};
+use crate::layout::NodeOrderKey;
+use refscape_model::{ConnectionKind, Position};
 use std::cell::Cell;
 
-fn card(id: &str, x: f32, y: f32, w: f32, h: f32) -> CodeCard {
-    CodeCard {
+fn card(id: &str, x: f32, y: f32, w: f32, h: f32) -> LayoutCard {
+    LayoutCard {
         id: id.into(),
-        position: Point::new(x, y),
-        width: w,
-        height: h,
-        source: SourceDocument {
-            symbol: Symbol::file(format!("{id}.rs").into(), SourceRange::default()),
-            code: String::new(),
-            tokens: Vec::new(),
-            context: Vec::new(),
-            code_start: None,
-            folded: Vec::new(),
-            expanded: Vec::new(),
+        position: Point::new(x, y).try_into().unwrap(),
+        size: refscape_model::WorldSize::new(w, h).unwrap(),
+        order: NodeOrderKey {
+            path: format!("{id}.rs").into(),
+            range_start: Position::default(),
+            range_end: Position::default(),
+            symbol_id: format!("file:{id}.rs"),
         },
     }
 }
 fn edge(from: &str, to: &str, line: u32, col: u32) -> Connection {
     Connection {
-        id: format!("{from}:{to}:{line}:{col}"),
+        id: format!("{from}:{to}:{line}:{col}").into(),
         from: from.into(),
         to: to.into(),
         source: Position::new(line, col),
         kind: ConnectionKind::Definition,
     }
 }
-fn arrange(cards: &[CodeCard], edges: &[Connection], selected: Option<&str>) -> Vec<CodeCard> {
+fn arrange(cards: &[LayoutCard], edges: &[Connection], selected: Option<&str>) -> Vec<LayoutCard> {
     let rules = LayoutRules::default();
     let plan = plan_tree_arrangement(cards, edges, selected, rules).unwrap();
     let mut after = cards.to_vec();
-    plan.apply_positions(&mut after, rules).unwrap();
+    apply(&plan, &mut after, rules).unwrap();
     validate_layout(&after, rules).unwrap();
     after
 }
-fn find<'a>(cards: &'a [CodeCard], id: &str) -> &'a CodeCard {
+fn find<'a>(cards: &'a [LayoutCard], id: &str) -> &'a LayoutCard {
     cards.iter().find(|c| c.id == id).unwrap()
 }
-fn right(cards: &[CodeCard], from: &str, to: &str) {
+fn right(cards: &[LayoutCard], from: &str, to: &str) {
     assert!(
         f64::from(find(cards, to).position.x)
             >= CardRect::from(find(cards, from)).right()
@@ -82,7 +79,7 @@ fn rectangle_sizes_reserve_subtree_blocks_and_level_width() {
         card("r1", 5000.0, 0.0, 100.0, 128.0),
     ];
     // Effective body height follows source even when the saved height is stale.
-    cards[4].source.code = "x\n".repeat(30);
+    cards[4].size = refscape_model::WorldSize::new(cards[4].size.width(), 676.0).unwrap();
     let edges = vec![
         edge("root", "left", 1, 0),
         edge("root", "right", 2, 0),
@@ -205,9 +202,9 @@ fn ordered_tree_is_adopted_even_when_bounding_box_grows() {
     assert_eq!(after[3].position.y, 0.0);
     // This fixture grows from a vertical 100*734 box to a horizontal 700*128
     // box. Inspect the actual rectangles without reviving a production area API.
-    let new_width = (after[3].position.x + after[3].width) - after[0].position.x;
-    let old_height = (cards[3].position.y + cards[3].display_height()) - cards[0].position.y;
-    assert!(new_width * after[0].display_height() > cards[0].width * old_height);
+    let new_width = (after[3].position.x + after[3].size.width()) - after[0].position.x;
+    let old_height = (cards[3].position.y + cards[3].size.height()) - cards[0].position.y;
+    assert!(new_width * after[0].size.height() > cards[0].size.width() * old_height);
 }
 
 #[test]
@@ -257,12 +254,10 @@ fn empty_leaf_and_cancelled_plans_leave_input_unchanged() {
     assert_eq!(cards, before);
     let plan = plan_tree_arrangement(&cards, &edges, None, LayoutRules::default()).unwrap();
     let mut stale = cards.clone();
-    stale[1].position.x += 1.0;
+    stale[1].position =
+        refscape_model::WorldPoint::new(stale[1].position.x + 1.0, stale[1].position.y).unwrap();
     let snapshot = stale.clone();
-    assert!(
-        plan.apply_positions(&mut stale, LayoutRules::default())
-            .is_err()
-    );
+    assert!(apply(&plan, &mut stale, LayoutRules::default()).is_err());
     assert_eq!(stale, snapshot);
 }
 
@@ -277,7 +272,7 @@ fn large_negative_root_adds_the_gap_after_right_edge() {
     right(&after, "root", "child");
 }
 
-fn coarse_translation_fixture(count: usize) -> (Vec<CodeCard>, Vec<Connection>) {
+fn coarse_translation_fixture(count: usize) -> (Vec<LayoutCard>, Vec<Connection>) {
     let mut cards = vec![card("root", 0.0, 0.0, 100.0, 128.0)];
     let mut edges = Vec::new();
     for i in 0..count {
@@ -310,7 +305,7 @@ fn many_translated_siblings_need_wider_spans_not_a_translation_phase() {
     let tree = OrderedTree::build(&cards, &edges, 0, &|| false).unwrap();
     let base = rectangle_positions(&cards, &tree, rules, 0.0, &|| false).unwrap();
     let grid = f64::from(100000.0_f32.next_up()) - 100000.0;
-    let required = f64::from(cards[1].display_height()) + f64::from(rules.gap);
+    let required = f64::from(cards[1].size.height()) + f64::from(rules.gap);
     let minimum_span = 6.0 * (required / grid).ceil() * grid;
     let old_span = f64::from(base[7].position.y) - f64::from(base[1].position.y);
     // Endpoint rounding can change the total span by at most one grid unit. The
@@ -389,4 +384,56 @@ fn cancellation_during_spacing_rebuild_never_commits_partial_positions() {
         );
         assert_eq!(cards, before);
     }
+}
+fn apply(plan: &LayoutDelta, cards: &mut [LayoutCard], rules: LayoutRules) -> Result<()> {
+    let mut after = cards.to_vec();
+    for change in &plan.changes {
+        let card = after
+            .iter_mut()
+            .find(|c| c.id == change.id)
+            .ok_or_else(|| crate::invalid("Missing card"))?;
+        if card.position != change.before {
+            return Err(crate::invalid("Stale plan"));
+        }
+        card.position = change.after;
+    }
+    validate_layout(&after, rules)?;
+    cards.clone_from_slice(&after);
+    Ok(())
+}
+
+#[test]
+fn malformed_graph_input_is_rejected_with_typed_invalid_data() {
+    let cards = vec![
+        card("root", 0.0, 0.0, 100.0, 128.0),
+        card("child", 1000.0, 0.0, 100.0, 128.0),
+    ];
+    let error = plan_tree_arrangement(
+        &cards,
+        &[edge("root", "missing", 0, 0)],
+        None,
+        LayoutRules::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, refscape_model::ErrorKind::InvalidData);
+    assert_eq!(
+        plan_tree_arrangement(
+            &[],
+            &[edge("root", "missing", 0, 0)],
+            None,
+            LayoutRules::default(),
+        )
+        .unwrap_err()
+        .kind,
+        refscape_model::ErrorKind::InvalidData
+    );
+    let mut invalid = cards.clone();
+    invalid[0].id = "".into();
+    assert_eq!(
+        validate_layout(&invalid, LayoutRules::default())
+            .unwrap_err()
+            .kind,
+        refscape_model::ErrorKind::InvalidData
+    );
+    assert_eq!(cards[0].position, Point::default());
 }

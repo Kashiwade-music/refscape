@@ -5,40 +5,46 @@ mod order;
 #[cfg(test)]
 mod tests;
 
-use super::{CardRect, LayoutPlan, LayoutRules, validate_layout};
+use super::LayoutCard;
+#[cfg(test)]
+use super::validate_layout;
+use super::{CardRect, LayoutDelta, LayoutRules, check_cancelled};
 use crate::Result;
 use order::OrderedTree;
-use refscape_model::{CodeCard, Connection, Point};
+use refscape_model::{Connection, Point};
 
 pub fn plan_tree_arrangement(
-    cards: &[CodeCard],
+    cards: &[LayoutCard],
     connections: &[Connection],
     selected: Option<&str>,
     rules: LayoutRules,
-) -> Result<LayoutPlan> {
+) -> Result<LayoutDelta> {
     plan_tree_arrangement_cancellable(cards, connections, selected, rules, &|| false)
 }
 
 /// Preserve the selected root (or first saved card) and every unreachable card.
 /// Connections only select an ordered spanning tree; no connection is removed.
-pub fn plan_tree_arrangement_cancellable(
-    cards: &[CodeCard],
+pub(crate) fn plan_tree_arrangement_cancellable(
+    cards: &[LayoutCard],
     connections: &[Connection],
     selected: Option<&str>,
     rules: LayoutRules,
     cancelled: &dyn Fn() -> bool,
-) -> Result<LayoutPlan> {
+) -> Result<LayoutDelta> {
     check_cancelled(cancelled)?;
-    validate_layout(cards, rules)?;
+    super::geometry::validate_layout_cancellable(cards, rules, cancelled)?;
     if cards.is_empty() {
-        return LayoutPlan::between(cards, cards, rules);
+        if !connections.is_empty() {
+            return Err(crate::invalid("Layout edge refers to a missing card"));
+        }
+        return LayoutDelta::between_cancellable(cards, cards, rules, cancelled);
     }
     let root = selected
         .and_then(|id| cards.iter().position(|card| card.id == id))
         .unwrap_or(0);
     let tree = OrderedTree::build(cards, connections, root, cancelled)?;
     if tree.order.len() == 1 {
-        return LayoutPlan::between(cards, cards, rules);
+        return LayoutDelta::between_cancellable(cards, cards, rules, cancelled);
     }
     let mut spacing_margin = 0.0_f64;
     // Translating to a coarser f32 grid may require wider subtree blocks, not just
@@ -52,7 +58,7 @@ pub fn plan_tree_arrangement_cancellable(
             obstacles::Placement::Ready(candidate) => {
                 check_cancelled(cancelled)?;
                 validate_tree(&candidate, &tree, rules)?;
-                return LayoutPlan::between(cards, &candidate, rules);
+                return LayoutDelta::between_cancellable(cards, &candidate, rules, cancelled);
             }
             obstacles::Placement::WiderSpacing(required) if required > spacing_margin => {
                 spacing_margin = required
@@ -60,16 +66,18 @@ pub fn plan_tree_arrangement_cancellable(
             obstacles::Placement::WiderSpacing(_) => break,
         }
     }
-    Err("Cannot preserve tree spacing at these canvas coordinates".into())
+    Err(crate::invalid(
+        "Cannot preserve tree spacing at these canvas coordinates",
+    ))
 }
 
 fn rectangle_positions(
-    cards: &[CodeCard],
+    cards: &[LayoutCard],
     tree: &OrderedTree,
     rules: LayoutRules,
     spacing_margin: f64,
     cancelled: &dyn Fn() -> bool,
-) -> Result<Vec<CodeCard>> {
+) -> Result<Vec<LayoutCard>> {
     let rects: Vec<_> = cards.iter().map(CardRect::from).collect();
     let levels = tree.order.iter().map(|&i| tree.depth[i]).max().unwrap_or(0) + 1;
     let mut widths = vec![0.0_f64; levels];
@@ -112,7 +120,7 @@ fn rectangle_positions(
         check_cancelled(cancelled)?;
         if i != tree.root {
             let y = tops[i] + (heights[i] - f64::from(rects[i].height)) / 2.0;
-            candidate[i].position = Point::new(xs[tree.depth[i]], finite_f32(y)?);
+            candidate[i].position = Point::new(xs[tree.depth[i]], finite_f32(y)?).try_into()?;
             CardRect::from(&candidate[i]).validate()?;
         }
         let mut child_top = tops[i] + (heights[i] - child_heights[i]) / 2.0;
@@ -124,12 +132,12 @@ fn rectangle_positions(
     // Validate the tree before considering external obstacles. Collision repair
     // translates its descendants as one group and cannot rearrange its branches.
     let reachable: Vec<_> = tree.order.iter().map(|&i| candidate[i].clone()).collect();
-    validate_layout(&reachable, rules)?;
+    super::geometry::validate_layout_cancellable(&reachable, rules, cancelled)?;
     validate_tree(&candidate, tree, rules)?;
     Ok(candidate)
 }
 
-fn validate_tree(cards: &[CodeCard], tree: &OrderedTree, rules: LayoutRules) -> Result<()> {
+fn validate_tree(cards: &[LayoutCard], tree: &OrderedTree, rules: LayoutRules) -> Result<()> {
     let mut last_at_depth =
         vec![None; tree.order.iter().map(|&i| tree.depth[i]).max().unwrap_or(0) + 1];
     for &i in &tree.order {
@@ -137,22 +145,19 @@ fn validate_tree(cards: &[CodeCard], tree: &OrderedTree, rules: LayoutRules) -> 
             && f64::from(cards[i].position.x)
                 < CardRect::from(&cards[parent]).right() + f64::from(rules.right_gap)
         {
-            return Err("Tree children must remain to the right of their parent".into());
+            return Err(crate::invalid(
+                "Tree children must remain to the right of their parent",
+            ));
         }
         if let Some(previous) = last_at_depth[tree.depth[i]]
             && f64::from(cards[i].position.y)
                 < CardRect::from(&cards[previous]).bottom() + f64::from(rules.gap)
         {
-            return Err("Tree branches must retain source appearance order".into());
+            return Err(crate::invalid(
+                "Tree branches must retain source appearance order",
+            ));
         }
         last_at_depth[tree.depth[i]] = Some(i);
-    }
-    Ok(())
-}
-
-fn check_cancelled(cancelled: &dyn Fn() -> bool) -> Result<()> {
-    if cancelled() {
-        return Err("Layout calculation cancelled".into());
     }
     Ok(())
 }
@@ -160,7 +165,7 @@ fn check_cancelled(cancelled: &dyn Fn() -> bool) -> Result<()> {
 fn finite_f32(value: f64) -> Result<f32> {
     let saved = value as f32;
     if !saved.is_finite() {
-        return Err("Tree layout exceeds finite canvas limits".into());
+        return Err(crate::invalid("Tree layout exceeds finite canvas limits"));
     }
     Ok(saved)
 }
@@ -173,14 +178,14 @@ fn ceil_f32(value: f64) -> Result<f32> {
         saved
     };
     if !saved.is_finite() {
-        return Err("Tree layout exceeds finite canvas limits".into());
+        return Err(crate::invalid("Tree layout exceeds finite canvas limits"));
     }
     Ok(saved)
 }
 
 fn float_margin(scale: f64) -> Result<f64> {
     if !scale.is_finite() {
-        return Err("Tree layout exceeds finite canvas limits".into());
+        return Err(crate::invalid("Tree layout exceeds finite canvas limits"));
     }
     // An unrepresentable far obstacle boundary must not discard its finite near
     // boundary. At the f32 limit use the inward ULP; clamp larger boundary scales

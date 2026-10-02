@@ -1,5 +1,14 @@
 //! Source glyph mapping, connection anchors, syntax runs, and variable highlights.
-use super::*;
+use super::{
+    HEADER, LINE, input,
+    painting::{PaintedCard, card_bounds},
+    render::color,
+    scene,
+};
+use gpui::{Bounds, Pixels, TextRun, Window, point, px, size};
+use refscape_application::{ApplicationSnapshot, VariableInspection};
+use refscape_model::{CodeCard, Palette, Point, Position};
+use std::ops::Range;
 
 pub(super) struct CodeConnection {
     pub(super) source_card: String,
@@ -16,7 +25,7 @@ pub(super) fn symbol_anchor_offset(
     position: Position,
 ) -> Option<Point> {
     let (row, word) = connected_word(card, position)?;
-    let line = &painted.rows.get(row)?.world_code;
+    let line = &painted.row(row)?.world_code;
     Some(Point::new(
         card.source.code_gutter_width() + f32::from(line.x_for_index(word.end)),
         HEADER + 8.0 + row as f32 * LINE,
@@ -26,83 +35,58 @@ pub(super) fn symbol_anchor_offset(
 /// Locate the displayed word using the server's absolute UTF-16 token range.
 /// Without semantic tokens, use ordinary text word selection, never code analysis.
 pub(super) fn connected_word(card: &CodeCard, position: Position) -> Option<(usize, Range<usize>)> {
-    if !card.source.contains_display_position(position) {
-        return None;
-    }
-    let row = card.source.display_row(position)?;
-    let lines = card.source.display_lines();
-    let text = lines.get(row)?.text.as_ref();
-    let first_character = lines[row].position?.character;
-    if let Some(token) = card.source.tokens.iter().find(|token| {
-        token.line == position.line
-            && token.start <= position.character
-            && token
-                .start
-                .checked_add(token.length)
-                .is_some_and(|end| position.character < end)
-    }) {
-        let start = token.start.saturating_sub(first_character);
-        let end = token
-            .start
-            .checked_add(token.length)?
-            .saturating_sub(first_character);
-        let start = refscape_model::utf16_byte_offset(text, start)?;
-        let end = refscape_model::utf16_byte_offset(text, end)?;
-        return (end > start).then_some((row, start..end));
-    }
-    let byte =
-        refscape_model::utf16_byte_offset(text, position.character.checked_sub(first_character)?)?;
-    let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
-    if !text[byte..].chars().next().is_some_and(is_word) {
-        return None;
-    }
-    let start = text[..byte]
-        .char_indices()
-        .rev()
-        .take_while(|(_, ch)| is_word(*ch))
-        .last()
-        .map_or(byte, |(index, _)| index);
-    let end = text[byte..]
-        .char_indices()
-        .take_while(|(_, ch)| is_word(*ch))
-        .last()
-        .map(|(index, ch)| byte + index + ch.len_utf8())?;
-    Some((row, start..end))
+    refscape_application::navigation::source_word(&card.source, position)
 }
-
 pub(super) fn code_connections(
-    session: &Session,
+    session: &ApplicationSnapshot,
     canvas: Bounds<Pixels>,
+    cache: &mut scene::SceneCache,
     window: &mut Window,
 ) -> Vec<CodeConnection> {
     if session.viewport.zoom < 0.65 {
         return vec![];
     }
     let zoom = session.viewport.zoom;
+    cache.index(session);
     session
         .connections
         .iter()
         .filter_map(|connection| {
-            let from = session
-                .cards
-                .iter()
-                .find(|card| card.id == connection.from)?;
-            let to = session.cards.iter().find(|card| card.id == connection.to)?;
+            let from = session.cards.get(cache.card(&connection.from)?)?;
+            let to = session.cards.get(cache.card(&connection.to)?)?;
             let (row, span) = connected_word(from, connection.source)?;
-            let lines = from.source.display_lines();
-            let text = lines.get(row)?.text.as_ref();
+            let rect = card_bounds(from, session, canvas);
+            let target = card_bounds(to, session, canvas);
+            // Conservatively bound the entire route before glyph work. Endpoints
+            // may both be outside the viewport while their route crosses it.
+            let source_y = rect.top() + px((HEADER + 8.0 + row as f32 * LINE) * zoom);
+            let target_y = target.top() + px(HEADER * zoom * 0.5);
+            let left = rect.left().min(target.left() - px(24.0 * zoom));
+            let right = (rect.right() + px(24.0 * zoom)).max(target.left());
+            let top = source_y.min(target_y) - px(LINE * zoom);
+            let bottom = source_y.max(target_y) + px(LINE * zoom);
+            if right < canvas.left()
+                || left > canvas.right()
+                || bottom < canvas.top()
+                || top > canvas.bottom()
+            {
+                return None;
+            }
+            let source = from.source.projection().rows.get(row)?;
+            cache.frame_work.edge_rows += 1;
+            let text = source.text();
             let runs = code_runs(
                 text,
                 connection.source.line,
-                lines[row].position?.character,
-                &from.source.tokens,
+                source.position()?.character,
+                from.source
+                    .projection()
+                    .token_indices(connection.source.line)
+                    .iter()
+                    .filter_map(|index| from.source.tokens.get(*index)),
                 &session.theme.palette,
             );
-            let line =
-                window
-                    .text_system()
-                    .shape_line(text.to_string().into(), px(12.0), &runs, None);
-            let rect = card_bounds(from, session, canvas);
+            let (line, _) = cache.shape(&from.source, row, &runs, zoom, window);
             let x = rect.left() + px(from.source.code_gutter_width() * zoom);
             let y = rect.top()
                 + px((HEADER + 8.0 + row as f32 * LINE) * zoom)
@@ -114,10 +98,10 @@ pub(super) fn code_connections(
                     px((1.5 * zoom).max(1.0)),
                 ),
             );
-            let target = card_bounds(to, session, canvas);
             let start = point(underline.right(), y + underline.size.height / 2.0);
+            cache.frame_work.painted_edges += 1;
             Some(CodeConnection {
-                source_card: from.id.clone(),
+                source_card: from.id.to_string(),
                 underline,
                 start,
                 exit: point(rect.right() + px(24.0 * zoom), start.y),
@@ -126,32 +110,12 @@ pub(super) fn code_connections(
         })
         .collect()
 }
-pub(super) fn card_title(session: &Session, card: &CodeCard) -> String {
-    let mut variables = Vec::new();
-    for edge in session
-        .connections
-        .iter()
-        .filter(|edge| edge.to == card.id && edge.kind == ConnectionKind::TypeDefinition)
-    {
-        let Some(origin) = session.cards.iter().find(|origin| origin.id == edge.from) else {
-            continue;
-        };
-        if let Some((row, span)) = connected_word(origin, edge.source)
-            && let Some(line) = origin.source.display_lines().get(row)
-        {
-            let name = line.text[span].to_string();
-            if !variables.contains(&name) {
-                variables.push(name);
-            }
-        }
-    }
-    if variables.is_empty() {
-        card.source.symbol.name.clone()
-    } else {
-        format!("{} → {}", variables.join(", "), card.source.symbol.name)
-    }
+#[cfg(test)]
+pub(super) fn card_title(session: &ApplicationSnapshot, card: &CodeCard) -> String {
+    let mut cache = scene::SceneCache::default();
+    cache.index(session);
+    cache.title(card)
 }
-
 /// Intersect absolute UTF-16 ranges with an excerpt's displayed line.
 pub(super) fn variable_highlight_spans(
     card: &CodeCard,
@@ -163,17 +127,21 @@ pub(super) fn variable_highlight_spans(
     else {
         return Vec::new();
     };
-    let lines = card.source.display_lines();
-    let Some(source) = lines.get(row) else {
+    let Some(source) = card.source.projection().rows.get(row) else {
         return Vec::new();
     };
-    let Some(position) = source.position else {
+    let Some(position) = source.position() else {
         return Vec::new();
     };
-    let text = source.text.as_ref();
+    let text = source.text();
     let line = position.line;
     let first_character = position.character;
-    let last_character = first_character + text.encode_utf16().count() as u32;
+    let Some(last_character) = u32::try_from(text.encode_utf16().count())
+        .ok()
+        .and_then(|length| first_character.checked_add(length))
+    else {
+        return Vec::new();
+    };
     inspection
         .highlights
         .iter()
@@ -202,11 +170,11 @@ pub(super) fn variable_highlight_spans(
         .collect()
 }
 
-pub(super) fn code_runs(
+pub(super) fn code_runs<'a>(
     text: &str,
     line: u32,
     first_character: u32,
-    tokens: &[refscape_model::SemanticToken],
+    tokens: impl Iterator<Item = &'a refscape_model::SemanticToken>,
     palette: &Palette,
 ) -> Vec<TextRun> {
     let mut runs = vec![];
@@ -220,7 +188,7 @@ pub(super) fn code_runs(
         underline: None,
         strikethrough: None,
     };
-    let mut tokens: Vec<_> = tokens.iter().filter(|token| token.line == line).collect();
+    let mut tokens: Vec<_> = tokens.filter(|token| token.line == line).collect();
     tokens.sort_by_key(|token| token.start);
     for token in tokens {
         let start =

@@ -1,7 +1,7 @@
 //! UTF-16-aware native text input, including IME composition.
 use super::ExplorerView;
 use gpui::{Bounds, Context, EntityInputHandler, Pixels, UTF16Selection, Window};
-use refscape_application::ports::{LanguageService, SessionRepository};
+
 use std::ops::Range;
 
 pub(crate) fn utf16_to_byte(text: &str, offset: usize) -> usize {
@@ -18,7 +18,7 @@ fn byte_to_utf16(text: &str, byte: usize) -> usize {
     text[..byte.min(text.len())].encode_utf16().count()
 }
 
-impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<L, R> {
+impl ExplorerView {
     pub(crate) fn replace_query(
         &mut self,
         range: Option<Range<usize>>,
@@ -46,9 +46,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
     }
 }
 
-impl<L: LanguageService + 'static, R: SessionRepository + 'static> EntityInputHandler
-    for ExplorerView<L, R>
-{
+impl EntityInputHandler for ExplorerView {
     fn text_for_range(
         &mut self,
         range: Range<usize>,

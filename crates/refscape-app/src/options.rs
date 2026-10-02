@@ -1,4 +1,4 @@
-use refscape_model::{ProjectLanguage, ProjectOptions};
+use refscape_model::{ProjectLanguage, ProjectOpenOptions};
 use std::{ffi::OsString, path::PathBuf};
 
 pub const HELP: &str = "Refscape — a spatial Rust, C/C++, TypeScript/React, and Python code explorer\n\n\
@@ -29,7 +29,7 @@ pub struct Options {
     pub clangd: Option<PathBuf>,
     pub typescript: Option<PathBuf>,
     pub pyright: Option<PathBuf>,
-    pub project_options: ProjectOptions,
+    pub project_options: ProjectOpenOptions,
     pub check: bool,
     pub help: bool,
     pub export_theme: Option<(String, PathBuf)>,
@@ -129,13 +129,10 @@ impl Options {
         if options.export_theme.is_some() && (options.check || options.project.is_some()) {
             return Err("--export-theme cannot be combined with a project or --check".into());
         }
-        if matches!(
-            options.project_options.language,
-            ProjectLanguage::Rust | ProjectLanguage::TypeScript | ProjectLanguage::Python
-        ) && options.project_options.compilation_database.is_some()
-        {
-            return Err("--compile-commands is only supported for C/C++ projects".into());
-        }
+        options
+            .project_options
+            .validate()
+            .map_err(|_| "--compile-commands is only supported for C/C++ projects".to_string())?;
         Ok(options)
     }
 }
@@ -195,7 +192,7 @@ mod tests {
         }
         assert_eq!(
             parse(&[]).unwrap().project_options,
-            ProjectOptions::default()
+            ProjectOpenOptions::default()
         );
     }
 

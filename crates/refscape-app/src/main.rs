@@ -1,24 +1,17 @@
-//! Composition root: native UI, language analysis, and versioned JSON storage.
-
+//! Composition boundary: one environment snapshot, controller and concrete worker ports.
+mod check;
+mod launch;
 mod options;
-
-use std::{
-    env,
-    path::Path,
-    process::ExitCode,
-    time::{SystemTime, UNIX_EPOCH},
-};
-
-use refscape_application::{explorer::Explorer, ports::SessionRepository};
-use refscape_language::LanguageBackend;
-use refscape_model::{Point, ProjectOptions, Theme};
+use launch::{LaunchConfig, LaunchRequest};
+use options::{HELP, Options};
+use refscape_application::{ApplicationController, Command, SessionRepository, WorkerExecutor};
+use refscape_language::{EnvironmentSnapshot, LanguageBackend};
+use refscape_model::Theme;
 use refscape_storage::{
     session::{JsonSessionRepository, default_session_path},
     theme::{load_theme, save_theme},
 };
-
-use options::{HELP, Options};
-
+use std::{env, path::PathBuf, process::ExitCode, sync::Arc};
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -28,156 +21,115 @@ fn main() -> ExitCode {
         }
     }
 }
-
+fn backend(config: &LaunchConfig) -> LanguageBackend {
+    let mut backend = LanguageBackend::from_environment(EnvironmentSnapshot::capture());
+    if let Some(path) = &config.analyzer {
+        backend = backend.with_rust_analyzer(path);
+    }
+    if let Some(path) = &config.clangd {
+        backend = backend.with_clangd(path);
+    }
+    if let Some(path) = &config.typescript {
+        backend = backend.with_typescript_server(path);
+    }
+    if let Some(path) = &config.pyright {
+        backend = backend.with_pyright_server(path);
+    }
+    backend
+}
 fn run() -> Result<(), String> {
-    let mut options = Options::parse(env::args_os().skip(1))?;
-    if options.help {
-        print!("{HELP}");
-        return Ok(());
+    match Options::parse(env::args_os().skip(1))?.into_request()? {
+        LaunchRequest::Help => {
+            print!("{HELP}");
+            Ok(())
+        }
+        LaunchRequest::ExportTheme { name, path } => {
+            let theme = if name == "light" {
+                Theme::light()
+            } else {
+                Theme::dark()
+            };
+            save_theme(&path, &theme)?;
+            println!("Saved {} theme to {}", theme.name, path.display());
+            Ok(())
+        }
+        LaunchRequest::Check { root, config } => {
+            check::project(backend(&config), &root, &config.project_options)
+        }
+        LaunchRequest::Gui(config) => gui(config),
     }
-    if let Some((name, path)) = options.export_theme {
-        let theme = if name == "light" {
-            Theme::light()
-        } else {
-            Theme::dark()
-        };
-        save_theme(&path, &theme)?;
-        println!("Saved {} theme to {}", theme.name, path.display());
-        return Ok(());
-    }
-    let analyzer = options
-        .analyzer
-        .or_else(|| env::var_os("REFSCAPE_RUST_ANALYZER").map(Into::into))
-        .unwrap_or_else(|| "rust-analyzer".into());
-    let clangd = options
-        .clangd
-        .or_else(|| env::var_os("REFSCAPE_CLANGD").map(Into::into))
-        .unwrap_or_else(|| "clangd".into());
-    let mut explorer = Explorer::new(
-        LanguageBackend::new(analyzer, clangd)
-            .with_typescript_server(
-                options
-                    .typescript
-                    .or_else(|| env::var_os("REFSCAPE_TYPESCRIPT_LANGUAGE_SERVER").map(Into::into))
-                    .unwrap_or_else(|| "typescript-language-server".into()),
-            )
-            .with_pyright_server(
-                options
-                    .pyright
-                    .or_else(|| env::var_os("REFSCAPE_PYRIGHT").map(Into::into))
-                    .unwrap_or_else(|| "basedpyright-langserver".into()),
-            ),
-        JsonSessionRepository,
-    );
-    if options.check {
-        return check_project(
-            &mut explorer,
-            options
-                .project
-                .as_deref()
-                .ok_or("--check requires a project")?,
-            &options.project_options,
-        );
-    }
+}
+fn canonical(path: PathBuf) -> Result<PathBuf, String> {
+    path.canonicalize()
+        .map_err(|error| format!("cannot open {}: {error}", path.display()))
+}
+fn gui(config: LaunchConfig) -> Result<(), String> {
+    let factory = backend(&config);
+    let mut controller = ApplicationController::new();
     let mut themes = Vec::new();
-    if let Some(path) = options.theme {
-        let theme = load_theme(&path)?;
-        explorer.set_theme(theme.clone())?;
+    if let Some(path) = &config.theme {
+        let theme = load_theme(path)?;
+        let transition = controller.dispatch(Command::SetTheme(theme.clone()));
+        if transition.events.iter().any(|event| {
+            matches!(
+                event,
+                refscape_application::ViewEvent::Status { error: true, .. }
+            )
+        }) {
+            return Err(controller.status().into());
+        }
         themes.push(theme);
     }
-    if let Some(path) = options.session.as_ref().filter(|path| path.exists()) {
-        let session = JsonSessionRepository.load(path)?;
-        if let Some(project) = &options.project {
-            let project = std::fs::canonicalize(project)
-                .map_err(|e| format!("cannot open {}: {e}", project.display()))?;
-            let saved = std::fs::canonicalize(&session.project_root).map_err(|e| e.to_string())?;
-            if project != saved {
-                return Err("the selected session belongs to a different project; omit PROJECT to open its project".into());
-            }
-        }
-        options.project = Some(session.project_root);
+    // Decode exactly once; startup and worker preparation share these fixed bytes.
+    let loaded = config
+        .session
+        .as_ref()
+        .filter(|path| path.exists())
+        .map(|path| JsonSessionRepository.load(path))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let project = config.project.map(canonical).transpose()?;
+    if let (Some(loaded), Some(project)) = (&loaded, &project)
+        && canonical(loaded.snapshot.project_root.clone())? != *project
+    {
+        return Err(
+            "the selected session belongs to a different project; omit PROJECT to open its project"
+                .into(),
+        );
     }
-    let project = options
-        .project
-        .map(|path| {
-            std::fs::canonicalize(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))
-        })
-        .transpose()?;
-    let session_path = options.session.unwrap_or_else(|| {
-        project
-            .as_deref()
+    let root = loaded
+        .as_ref()
+        .map(|loaded| loaded.snapshot.project_root.clone())
+        .or(project.clone());
+    let session_path = config.session.clone().unwrap_or_else(|| {
+        root.as_deref()
             .map(default_session_path)
             .unwrap_or_default()
     });
+    let initial = if let Some(loaded) = loaded {
+        Some(Command::OpenLoaded {
+            loaded,
+            destination: session_path.clone(),
+            expected_root: project,
+            overrides: config.project_options.clone(),
+        })
+    } else {
+        root.map(|root| Command::OpenProject {
+            root,
+            options: config.project_options.clone(),
+            destination: session_path.clone(),
+        })
+    };
+    let executor = Arc::new(WorkerExecutor::new(
+        Arc::new(factory),
+        Arc::new(JsonSessionRepository),
+    ));
     refscape_ui::runtime::run(
-        explorer,
+        controller,
+        executor,
         session_path,
         themes,
-        project,
-        options.project_options,
+        initial,
+        config.project_options,
     )
-}
-
-/// Real-backend smoke check, with a disposable session that never overwrites user work.
-fn check_project(
-    explorer: &mut Explorer<LanguageBackend, JsonSessionRepository>,
-    project: &Path,
-    project_options: &ProjectOptions,
-) -> Result<(), String> {
-    let project = std::fs::canonicalize(project).map_err(|e| e.to_string())?;
-    explorer.open_project(&project, project_options)?;
-    let files = explorer.files()?;
-    let mut selected = None;
-    for path in &files {
-        if let Some(symbol) = explorer.symbols(path)?.into_iter().next() {
-            selected = Some(symbol);
-            break;
-        }
-    }
-    let symbol = selected.ok_or("project contains no symbols")?;
-    let position = symbol.selection_range.start;
-    let id = explorer.add_symbol(symbol, Point::new(40.0, 40.0))?;
-    let card = explorer
-        .session()
-        .cards
-        .iter()
-        .find(|card| card.id == id)
-        .ok_or("source card was not created")?;
-    if card.source.code.is_empty() {
-        return Err("language backend returned empty source".into());
-    }
-    let token_count = card.source.tokens.len();
-    let definitions = explorer.expand_definition(&id, position)?.len();
-    let references = explorer.expand_references(&id, position)?.len();
-    explorer.move_card(&id, Point::new(120.0, 80.0))?;
-    explorer.pan(Point::new(-20.0, 35.0))?;
-    explorer.zoom(0.8, Point::new(200.0, 200.0))?;
-    let snapshot = explorer.session().clone();
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_nanos();
-    let path = env::temp_dir().join(format!(
-        "refscape-check-{}-{stamp}.json",
-        std::process::id()
-    ));
-    let result: Result<(), String> = (|| {
-        explorer.save_session(&path)?;
-        explorer.load_session(&path)?;
-        if explorer.session() != &snapshot {
-            return Err("saved session did not restore exactly".into());
-        }
-        Ok(())
-    })();
-    let _ = std::fs::remove_file(path);
-    result?;
-    println!(
-        "Refscape check passed: {} source files, {} cards, {} connections; \
-         {definitions} definition results, {references} reference results, \
-         {token_count} semantic tokens; canvas and session roundtrip verified",
-        files.len(),
-        snapshot.cards.len(),
-        snapshot.connections.len()
-    );
-    Ok(())
 }

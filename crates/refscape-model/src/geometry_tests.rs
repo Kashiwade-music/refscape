@@ -7,7 +7,7 @@ fn card() -> CodeCard {
     };
     CodeCard {
         id: "card".into(),
-        source: SourceDocument {
+        source: CardSource::try_from(SourceDocument {
             symbol: Symbol::file("project/main.rs".into(), range),
             code: "fn main() {}".into(),
             tokens: vec![],
@@ -15,8 +15,9 @@ fn card() -> CodeCard {
             code_start: None,
             folded: vec![],
             expanded: vec![],
-        },
-        position: Point::new(-500.0, -500.0),
+        })
+        .unwrap(),
+        position: WorldPoint::new(-500.0, -500.0).unwrap(),
         width: 500.0,
         height: 128.0,
     }
@@ -26,9 +27,7 @@ fn card() -> CodeCard {
 fn geometry_rejects_invalid_dimensions_and_unrepresentable_edges() {
     let original = card();
     original.validate_geometry().unwrap();
-    let mut session = Session::new("project".into());
-    session.cards.push(original.clone());
-    session.validate().unwrap();
+
     for (position, width, height) in [
         (Point::new(f32::NAN, 0.0), 500.0, 128.0),
         (Point::new(0.0, f32::INFINITY), 500.0, 128.0),
@@ -42,22 +41,37 @@ fn geometry_rejects_invalid_dimensions_and_unrepresentable_edges() {
         (Point::new(0.0, -f32::MAX), 500.0, 128.0),
     ] {
         let mut invalid = original.clone();
+        let Ok(position) = WorldPoint::try_from(position) else {
+            continue;
+        };
         invalid.position = position;
         invalid.width = width;
         invalid.height = height;
         // Validate a late invalid card as well as an isolated card.
         invalid.id = "late".into();
-        session.cards.push(invalid);
-        assert!(session.validate().is_err());
-        session.cards.pop();
-        assert_eq!(session.cards[0], original);
+        assert!(invalid.validate_geometry().is_err());
     }
 }
 
 #[test]
-fn session_validation_keeps_overlap_repair_in_the_canvas_layer() {
-    let mut session = Session::new("project".into());
-    session.cards = vec![card(), card()];
-    session.cards[1].id = "other".into();
-    session.validate().unwrap();
+fn typed_coordinates_reject_nonfinite_and_conversion_overflow() {
+    assert!(WorldPoint::new(f32::NAN, 0.0).is_err());
+    assert!(ScreenPoint::new(0.0, f32::INFINITY).is_err());
+    assert!(WorldSize::new(0.0, 128.0).is_err());
+    let viewport = Viewport {
+        offset: ScreenPoint::default(),
+        zoom: 3.0,
+    };
+    assert!(
+        viewport
+            .project_world(WorldPoint::new(f32::MAX, 0.0).unwrap())
+            .is_err()
+    );
+    let world = WorldPoint::new(-500.0, 123.0).unwrap();
+    assert_eq!(
+        viewport
+            .unproject_screen(viewport.project_world(world).unwrap())
+            .unwrap(),
+        world
+    );
 }

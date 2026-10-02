@@ -1,5 +1,5 @@
 //! Real-server coverage, opt-in because rust-analyzer is an external toolchain component.
-use refscape_application::ports::LanguageService;
+mod support;
 use refscape_language_rust::RustAnalyzer;
 use refscape_model::{Position, SourceRange, Symbol};
 use std::{
@@ -20,9 +20,10 @@ fn real_server_preserves_nested_module_and_impl_context_on_method_cards() {
     let code = "mod outer {\n    pub struct CppProject;\n    impl CppProject {\n        pub fn first(&self) {}\n\n        pub(crate) fn options(&self) -> u32 {\n            42\n        }\n    }\n}\nfn main() {}\n";
     let path = root.join("src/main.rs");
     fs::write(&path, code).unwrap();
-    let mut language = RustAnalyzer::default().with_timeout(Duration::from_secs(30));
+    let mut language =
+        support::Opened::new(RustAnalyzer::default()).with_timeout(Duration::from_secs(30));
     language
-        .open_project(&root, &refscape_model::ProjectOptions::default())
+        .open_project(&root, &refscape_model::ProjectOpenOptions::default())
         .unwrap();
     fn find(symbols: &[Symbol]) -> Option<&Symbol> {
         symbols.iter().find_map(|symbol| {
@@ -55,84 +56,34 @@ fn real_server_preserves_nested_module_and_impl_context_on_method_cards() {
         source.code
     );
     assert_eq!(source.code_start, Some(Position::new(5, 0)));
-    let rows = source.display_lines();
+    let projection = refscape_model::CardSource::try_from(source.clone()).unwrap();
+    let rows = projection.display_lines();
     assert_eq!(
         rows.iter()
             .map(|row| row.position.map(|p| p.line))
             .collect::<Vec<_>>(),
         vec![Some(0), None, Some(2), None, Some(5), Some(6), Some(7)]
     );
-    assert_eq!(source.display_row(Position::new(5, 30)), Some(4));
+    assert_eq!(projection.display_row(Position::new(5, 30)), Some(4));
     source.validate().unwrap();
     assert!(source.folded[1].code.contains("pub fn first"));
-    struct NoSession;
-    impl refscape_application::ports::SessionRepository for NoSession {
-        fn save(&self, _: &std::path::Path, _: &refscape_model::Session) -> Result<(), String> {
-            unreachable!()
-        }
-        fn load(&self, _: &std::path::Path) -> Result<refscape_model::Session, String> {
-            unreachable!()
-        }
-    }
-    let mut explorer = refscape_application::explorer::Explorer::new(language, NoSession);
-    explorer
-        .open_project(&root, &refscape_model::ProjectOptions::default())
-        .unwrap();
-    let id = explorer
-        .add_symbol(method.clone(), refscape_model::Point::default())
-        .unwrap();
     let type_column = code.lines().nth(2).unwrap().find("CppProject").unwrap() as u32;
-    let target = explorer
-        .expand_definition(&id, Position::new(2, type_column))
-        .unwrap()
-        .remove(0);
-    assert_eq!(
-        explorer
-            .session()
-            .cards
-            .iter()
-            .find(|card| card.id == target)
-            .unwrap()
-            .source
-            .symbol
-            .kind,
-        "struct"
-    );
-    explorer.expand_context(&id, 1).unwrap();
-    let card = explorer
-        .session()
-        .cards
-        .iter()
-        .find(|card| card.id == id)
+    let targets = language
+        .definitions(&path, Position::new(2, type_column))
         .unwrap();
-    assert_eq!(card.source.display_row(Position::new(5, 30)), Some(5));
-    assert!(card.source.contains_display_position(Position::new(3, 15)));
-    assert!(card.source.context[1].code.contains("pub fn first"));
-    let expanded = card.source.clone();
-    explorer.collapse_context(&id, 1).unwrap();
-    assert_eq!(
-        explorer
-            .session()
-            .cards
-            .iter()
-            .find(|card| card.id == id)
-            .unwrap()
-            .source,
-        source
-    );
-    explorer.expand_context(&id, 1).unwrap();
-    assert_eq!(
-        explorer
-            .session()
-            .cards
-            .iter()
-            .find(|card| card.id == id)
-            .unwrap()
-            .source,
-        expanded
-    );
-    explorer.session().validate().unwrap();
-    drop(explorer);
+    assert_eq!(targets[0].kind, "struct");
+    let mut card = refscape_model::CardSource::try_from(source.clone()).unwrap();
+    card.toggle_fold(1).unwrap();
+    assert_eq!(card.display_row(Position::new(5, 30)), Some(5));
+    assert!(card.contains_display_position(Position::new(3, 15)));
+    assert!(card.export_context()[1].code.contains("pub fn first"));
+    let expanded = card.to_document();
+    card.toggle_fold(1).unwrap();
+    assert_eq!(card.to_document(), source);
+    card.toggle_fold(1).unwrap();
+    assert_eq!(card.to_document(), expanded);
+    card.validate().unwrap();
+    drop(language);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -166,16 +117,18 @@ fn real_server_resolves_inferred_variable_types_and_scope_aware_highlights() {
             end: Position::new(line, start.character + word.encode_utf16().count() as u32),
         }
     };
-    let mut language = RustAnalyzer::default().with_timeout(Duration::from_secs(30));
+    let mut language =
+        support::Opened::new(RustAnalyzer::default()).with_timeout(Duration::from_secs(30));
     language
-        .open_project(&root, &refscape_model::ProjectOptions::default())
+        .open_project(&root, &refscape_model::ProjectOpenOptions::default())
         .unwrap();
     let file = language
         .source(&Symbol::file(lib.clone(), SourceRange::default()))
         .unwrap();
-    assert!(file.variable_token(at(4, "value")).is_some());
-    assert!(file.variable_token(at(2, "config")).is_some());
-    assert!(file.variable_token(at(2, "entry")).is_none());
+    let file_projection = refscape_model::CardSource::try_from(file.clone()).unwrap();
+    assert!(file_projection.variable_token(at(4, "value")).is_some());
+    assert!(file_projection.variable_token(at(2, "config")).is_some());
+    assert!(file_projection.variable_token(at(2, "entry")).is_none());
     let types = language.type_definitions(&lib, at(4, "value")).unwrap();
     assert_eq!(types.len(), 1);
     assert_eq!(types[0].name, "Config");
@@ -248,9 +201,10 @@ fn real_server_follows_cross_file_definitions_references_and_highlights() {
         "/// Returns the answer.\npub fn answer() -> u32 {\n    42\n}\n",
     )
     .unwrap();
-    let mut language = RustAnalyzer::default().with_timeout(Duration::from_secs(20));
+    let mut language =
+        support::Opened::new(RustAnalyzer::default()).with_timeout(Duration::from_secs(20));
     language
-        .open_project(&root, &refscape_model::ProjectOptions::default())
+        .open_project(&root, &refscape_model::ProjectOpenOptions::default())
         .unwrap();
     let crates = language.project_crates().unwrap();
     assert_eq!(crates.len(), 1);
@@ -319,7 +273,7 @@ fn real_server_follows_cross_file_definitions_references_and_highlights() {
     fs::write(broken.join("Cargo.toml"), "[package]\nname =\n").unwrap();
     assert!(
         language
-            .open_project(&broken, &refscape_model::ProjectOptions::default())
+            .open_project(&broken, &refscape_model::ProjectOpenOptions::default())
             .is_err()
     );
     assert_eq!(language.project_crates().unwrap(), crates);
@@ -392,9 +346,10 @@ fn real_workspace_packages_use_cargo_boundaries_and_custom_targets() {
         "this is outside the Cargo workspace packages\n",
     )
     .unwrap();
-    let mut language = RustAnalyzer::default().with_timeout(Duration::from_secs(60));
+    let mut language =
+        support::Opened::new(RustAnalyzer::default()).with_timeout(Duration::from_secs(60));
     language
-        .open_project(&root, &refscape_model::ProjectOptions::default())
+        .open_project(&root, &refscape_model::ProjectOpenOptions::default())
         .unwrap();
     let crates = language.project_crates().unwrap();
     assert_eq!(

@@ -1,6 +1,7 @@
 use super::check_cancelled;
 use crate::Result;
-use refscape_model::{CodeCard, Connection, Position};
+use crate::layout::LayoutCard;
+use refscape_model::{Connection, Position};
 use std::collections::{BTreeMap, VecDeque};
 
 pub(super) struct OrderedTree {
@@ -13,7 +14,7 @@ pub(super) struct OrderedTree {
 
 impl OrderedTree {
     pub fn build(
-        cards: &[CodeCard],
+        cards: &[LayoutCard],
         connections: &[Connection],
         root: usize,
         cancelled: &dyn Fn() -> bool,
@@ -26,33 +27,23 @@ impl OrderedTree {
         let mut outgoing: Vec<Vec<(Position, usize)>> = vec![Vec::new(); cards.len()];
         for edge in connections {
             check_cancelled(cancelled)?;
-            if let (Some(&from), Some(&to)) =
-                (ids.get(edge.from.as_str()), ids.get(edge.to.as_str()))
-            {
-                outgoing[from].push((edge.source, to));
-            }
+            let from = *ids
+                .get(edge.from.as_str())
+                .ok_or_else(|| crate::invalid("Layout edge refers to a missing card"))?;
+            let to = *ids
+                .get(edge.to.as_str())
+                .ok_or_else(|| crate::invalid("Layout edge refers to a missing card"))?;
+            outgoing[from].push((edge.source, to));
         }
         for edges in &mut outgoing {
             edges.sort_by(|a, b| {
                 let left = &cards[a.1];
                 let right = &cards[b.1];
                 a.0.cmp(&b.0)
-                    .then(left.source.symbol.path.cmp(&right.source.symbol.path))
-                    .then(
-                        left.source
-                            .symbol
-                            .range
-                            .start
-                            .cmp(&right.source.symbol.range.start),
-                    )
-                    .then(
-                        left.source
-                            .symbol
-                            .range
-                            .end
-                            .cmp(&right.source.symbol.range.end),
-                    )
-                    .then(left.source.symbol.id.cmp(&right.source.symbol.id))
+                    .then(left.order.path.cmp(&right.order.path))
+                    .then(left.order.range_start.cmp(&right.order.range_start))
+                    .then(left.order.range_end.cmp(&right.order.range_end))
+                    .then(left.order.symbol_id.cmp(&right.order.symbol_id))
                     .then(left.id.cmp(&right.id))
             });
         }

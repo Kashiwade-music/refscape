@@ -1,9 +1,6 @@
-//! Versioned JSON persistence for sessions, user settings, and themes.
-
+//! Versioned JSON persistence for immutable sessions and themes.
 mod document;
 pub mod session;
-pub mod settings;
-pub mod theme;
-
 #[cfg(test)]
 mod tests;
+pub mod theme;

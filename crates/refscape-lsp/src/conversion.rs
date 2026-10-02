@@ -1,4 +1,4 @@
-use refscape_model::{Position, SemanticToken, SourceRange, Symbol};
+use refscape_model::{ErrorKind, Position, RefscapeError, SemanticToken, SourceRange, Symbol};
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
@@ -29,24 +29,47 @@ pub(crate) fn hover_contents(value: &Value) -> Result<Option<String>, String> {
     Ok((!text.trim().is_empty()).then_some(text))
 }
 
-pub(crate) fn decode<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, String> {
-    serde_json::from_value(value.clone()).map_err(|e| format!("invalid LSP response: {e}"))
+#[derive(serde::Deserialize)]
+struct WirePosition {
+    line: u32,
+    character: u32,
+}
+#[derive(serde::Deserialize)]
+struct WireRange {
+    start: WirePosition,
+    end: WirePosition,
+}
+pub(crate) trait WireValue: Sized {
+    fn from_wire(value: &Value) -> Result<Self, String>;
+}
+impl WireValue for SourceRange {
+    fn from_wire(value: &Value) -> Result<Self, String> {
+        let raw: WireRange =
+            serde_json::from_value(value.clone()).map_err(|e| format!("invalid LSP range: {e}"))?;
+        let range = SourceRange {
+            start: Position::new(raw.start.line, raw.start.character),
+            end: Position::new(raw.end.line, raw.end.character),
+        };
+        range.validate()?;
+        Ok(range)
+    }
+}
+impl WireValue for Vec<u32> {
+    fn from_wire(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|e| format!("invalid LSP token data: {e}"))
+    }
+}
+pub(crate) fn decode<T: WireValue>(value: &Value) -> Result<T, String> {
+    T::from_wire(value)
+}
+pub(crate) fn position_wire(position: Position) -> Value {
+    serde_json::json!({"line":position.line,"character":position.character})
 }
 
 pub(crate) fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
     value[key]
         .as_str()
         .ok_or_else(|| format!("LSP response is missing {key}"))
-}
-
-pub(crate) fn strings(value: &Value) -> Vec<String> {
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect()
 }
 
 pub(crate) fn document_symbol(value: &Value, path: &Path) -> Result<Symbol, String> {
@@ -56,7 +79,7 @@ pub(crate) fn document_symbol(value: &Value, path: &Path) -> Result<Symbol, Stri
         .map(decode)
         .transpose()?
         .unwrap_or(range);
-    let kind = match value["kind"].as_u64().unwrap_or(0) {
+    let kind = match value["kind"].as_u64().ok_or("LSP symbol is missing kind")? {
         1 => "file",
         2 => "module",
         3 => "namespace",
@@ -85,12 +108,15 @@ pub(crate) fn document_symbol(value: &Value, path: &Path) -> Result<Symbol, Stri
         26 => "typeParameter",
         _ => "symbol",
     };
-    let children = value["children"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|child| document_symbol(child, path))
-        .collect::<Result<_, _>>()?;
+    let children = match value.get("children") {
+        None => vec![],
+        Some(children) => children
+            .as_array()
+            .ok_or("invalid LSP symbol children")?
+            .iter()
+            .map(|child| document_symbol(child, path))
+            .collect::<Result<_, _>>()?,
+    };
     Ok(Symbol {
         id: symbol_id(path, range),
         name: string(value, "name")?.into(),
@@ -117,6 +143,7 @@ pub(crate) fn before(left: Position, right: Position) -> bool {
     (left.line, left.character) < (right.line, right.character)
 }
 
+#[cfg(test)]
 pub(crate) fn enclosing(symbols: &[Symbol], position: Position) -> Option<&Symbol> {
     symbols
         .iter()
@@ -162,6 +189,12 @@ pub(crate) fn semantic_tokens(
     let (mut line, mut start) = (0_u32, 0_u32);
     let mut tokens = vec![];
     for item in data.as_chunks::<5>().0 {
+        if item[2] == 0 {
+            return Err("semantic token length must be positive".into());
+        }
+        if modifiers.len() < 32 && (item[4] >> modifiers.len()) != 0 {
+            return Err("invalid semantic token modifier index".into());
+        }
         line = line
             .checked_add(item[0])
             .ok_or("semantic token line overflow")?;
@@ -172,6 +205,9 @@ pub(crate) fn semantic_tokens(
         } else {
             item[1]
         };
+        start
+            .checked_add(item[2])
+            .ok_or("semantic token column overflow")?;
         let kind = types
             .get(item[3] as usize)
             .ok_or("invalid semantic token type index")?
@@ -194,65 +230,39 @@ pub(crate) fn semantic_tokens(
 }
 
 /// Convert the server's UTF-16 offset to a byte boundary without splitting surrogate pairs.
-pub fn byte_offset(text: &str, position: Position) -> Result<usize, String> {
-    let mut line_start = 0;
-    for _ in 0..position.line {
-        let newline = text[line_start..]
-            .find('\n')
-            .ok_or("source line is outside the document")?;
-        line_start += newline + 1;
-    }
-    let end = text[line_start..]
-        .find('\n')
-        .map(|index| line_start + index)
-        .unwrap_or(text.len());
-    let content_end = if end > line_start && text.as_bytes()[end - 1] == b'\r' {
-        end - 1
-    } else {
-        end
-    };
-    let mut utf16 = 0;
-    for (index, ch) in text[line_start..content_end].char_indices() {
-        if utf16 == position.character {
-            return Ok(line_start + index);
-        }
-        utf16 += ch.len_utf16() as u32;
-        if utf16 > position.character {
-            return Err("UTF-16 position splits a surrogate pair".into());
-        }
-    }
-    if utf16 == position.character {
-        Ok(content_end)
-    } else {
-        Err("source column is outside the line".into())
-    }
+pub fn byte_offset(text: &str, position: Position) -> Result<usize, RefscapeError> {
+    refscape_model::TextIndex::new(text).and_then(|index| index.byte_offset(position))
 }
 
+#[cfg(test)]
 pub(crate) fn slice(text: &str, range: SourceRange) -> Result<&str, String> {
-    let start = byte_offset(text, range.start)?;
-    let end = byte_offset(text, range.end)?;
+    let start = byte_offset(text, range.start).map_err(|error| error.to_string())?;
+    let end = byte_offset(text, range.end).map_err(|error| error.to_string())?;
     text.get(start..end)
         .ok_or_else(|| "invalid source range".into())
 }
 
 /// The complete range of an unmodified UTF-8 source file, measured in LSP UTF-16 units.
-pub fn full_range(text: &str) -> SourceRange {
-    let line = text.bytes().filter(|byte| *byte == b'\n').count() as u32;
+pub fn full_range(text: &str) -> Result<SourceRange, RefscapeError> {
+    let line = u32::try_from(text.bytes().filter(|byte| *byte == b'\n').count())
+        .map_err(|_| RefscapeError::new(ErrorKind::InvalidData, "source line overflow"))?;
     let last = text
         .rsplit('\n')
         .next()
         .unwrap_or("")
         .trim_end_matches('\r');
-    SourceRange {
+    Ok(SourceRange {
         start: Position {
             line: 0,
             character: 0,
         },
         end: Position {
             line,
-            character: last.encode_utf16().count() as u32,
+            character: u32::try_from(last.encode_utf16().count()).map_err(|_| {
+                RefscapeError::new(ErrorKind::InvalidData, "source column overflow")
+            })?,
         },
-    }
+    })
 }
 
 pub(crate) fn path_uri(path: &Path) -> Result<String, String> {
@@ -286,6 +296,30 @@ pub(crate) fn uri_path(uri: &str) -> Result<PathBuf, String> {
     let encoded = uri
         .strip_prefix("file://")
         .ok_or_else(|| format!("unsupported source URI: {uri}"))?;
+    if encoded.is_empty()
+        || encoded
+            .bytes()
+            .any(|byte| byte <= 0x20 || matches!(byte, b'?' | b'#'))
+    {
+        return Err("invalid file URI".into());
+    }
+    let local;
+    let encoded = if let Some((authority, path)) = encoded.split_once('/')
+        && authority.eq_ignore_ascii_case("localhost")
+    {
+        local = format!("/{path}");
+        local.as_str()
+    } else {
+        encoded
+    };
+    if !encoded.starts_with('/')
+        && encoded
+            .split('/')
+            .next()
+            .is_none_or(|authority| authority.is_empty() || authority.contains([':', '@']))
+    {
+        return Err("invalid file URI authority".into());
+    }
     let mut bytes = vec![];
     let mut index = 0;
     while index < encoded.len() {
@@ -301,6 +335,9 @@ pub(crate) fn uri_path(uri: &str) -> Result<PathBuf, String> {
         }
     }
     let text = String::from_utf8(bytes).map_err(|_| "non UTF-8 file URI")?;
+    if text.contains('\0') {
+        return Err("NUL in file URI".into());
+    }
     #[cfg(windows)]
     let text = if text.as_bytes().get(2) == Some(&b':') && text.starts_with('/') {
         text[1..].to_string()
@@ -379,7 +416,7 @@ mod tests {
             )
             .is_err()
         );
-        assert_eq!(slice(text, full_range(text)).unwrap(), text);
+        assert_eq!(slice(text, full_range(text).unwrap()).unwrap(), text);
     }
 
     #[test]
@@ -390,6 +427,34 @@ mod tests {
         let path = Path::new("/日本語/a #%.rs");
         assert_eq!(uri_path(&path_uri(path).unwrap()).unwrap(), path);
         assert!(uri_path("file:///bad%GG").is_err());
+        for uri in [
+            "file://",
+            "file:///bad%00",
+            "file:///name#fragment",
+            "untitled:///virtual",
+            "file://user@host/share",
+        ] {
+            assert!(uri_path(uri).is_err());
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                uri_path("file://localhost/C:/source.rs").unwrap(),
+                Path::new("C:/source.rs")
+            );
+            assert_eq!(
+                uri_path("file://server/share/source.rs").unwrap(),
+                Path::new("//server/share/source.rs")
+            );
+            assert_eq!(
+                path_uri(Path::new(r"\\?\C:\source.rs")).unwrap(),
+                "file:///C:/source.rs"
+            );
+            assert_eq!(
+                path_uri(Path::new(r"\\?\UNC\server\share\source.rs")).unwrap(),
+                "file://server/share/source.rs"
+            );
+        }
     }
 
     #[test]

@@ -1,14 +1,9 @@
-//! Cargo owns the authoritative package boundaries and target source locations.
+//! Cargo owns authoritative package and target boundaries.
 use refscape_model::ProjectCrate;
 use serde::Deserialize;
 use std::{
     collections::BTreeSet,
-    io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::mpsc,
-    thread,
-    time::{Duration, Instant},
 };
 
 #[derive(Deserialize)]
@@ -36,71 +31,37 @@ pub(crate) struct Project {
 }
 
 impl Project {
-    pub(crate) fn discover(root: &Path, timeout: Duration) -> Result<Self, String> {
-        let mut command = Command::new("cargo");
+    pub(crate) fn discover(
+        root: &Path,
+        context: &refscape_model::OperationContext,
+        environment: &refscape_language_support::EnvironmentSnapshot,
+    ) -> Result<Self, refscape_model::RefscapeError> {
+        let launch = refscape_language_support::resolver::resolve(
+            root,
+            &refscape_language_support::resolver::ConfiguredExecutable::default_name("cargo"),
+            refscape_language_support::resolver::ServerKind::Native,
+            environment,
+        )?;
+        let mut command = launch.command();
         command
             .args(["metadata", "--no-deps", "--format-version", "1"])
             .arg("--manifest-path")
             .arg(root.join("Cargo.toml"))
-            .current_dir(root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x08000000);
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("cannot run cargo metadata: {error}"))?;
-        let mut stdout = child.stdout.take().ok_or("missing cargo metadata stdout")?;
-        let mut stderr = child.stderr.take().ok_or("missing cargo metadata stderr")?;
-        let (out_sender, out_receiver) = mpsc::channel();
-        let (err_sender, err_receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let mut bytes = vec![];
-            let result = (&mut stdout)
-                .take(64 * 1024 * 1024 + 1)
-                .read_to_end(&mut bytes)
-                .map(|_| bytes);
-            let _ = out_sender.send(result);
-        });
-        thread::spawn(move || {
-            let mut bytes = vec![];
-            let _ = (&mut stderr).take(1024 * 1024).read_to_end(&mut bytes);
-            let _ = err_sender.send(bytes);
-        });
-        let deadline = Instant::now() + timeout;
-        let status = loop {
-            match child.try_wait().map_err(|error| error.to_string())? {
-                Some(status) => break status,
-                None if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err("cargo metadata timed out while loading package boundaries".into());
-                }
-                None => thread::sleep(Duration::from_millis(10)),
-            }
-        };
-        let bytes = out_receiver
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|error| format!("cannot read cargo metadata: {error}"))?
-            .map_err(|error| format!("cannot read cargo metadata: {error}"))?;
-        if !status.success() {
-            let errors = err_receiver
-                .recv_timeout(Duration::from_millis(100))
-                .unwrap_or_default();
-            return Err(format!(
-                "cargo metadata failed: {}",
-                String::from_utf8_lossy(&errors).trim()
+            .current_dir(root);
+        let output = refscape_language_support::process::run(&mut command, context)?;
+        if !output.success {
+            return Err(refscape_model::RefscapeError::new(
+                refscape_model::ErrorKind::BackendUnavailable,
+                format!(
+                    "cargo metadata failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
             ));
         }
-        if bytes.len() > 64 * 1024 * 1024 {
-            return Err("cargo metadata exceeds 64 MiB".into());
-        }
-        Self::parse(&bytes)
+        Self::parse(&output.stdout).map_err(|e| {
+            refscape_model::RefscapeError::new(refscape_model::ErrorKind::InvalidData, e)
+        })
     }
-
     fn parse(bytes: &[u8]) -> Result<Self, String> {
         let metadata: Metadata = serde_json::from_slice(bytes)
             .map_err(|error| format!("invalid cargo metadata: {error}"))?;
