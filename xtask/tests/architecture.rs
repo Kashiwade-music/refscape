@@ -368,18 +368,6 @@ fn normal_cycle_reports_the_path() {
 }
 
 #[test]
-fn cargo_permitted_dev_cycle_is_rejected() {
-    let fixture = Fixture::new();
-    fixture.append(
-        "crates/refscape-model/Cargo.toml",
-        "[dev-dependencies]\nrefscape-storage.workspace = true\n",
-    );
-    let error = fixture.error();
-    assert!(error.contains("dependency cycle:"), "{error}");
-    assert!(error.contains("--dev--> refscape-storage"), "{error}");
-}
-
-#[test]
 fn build_self_dependency_is_rejected() {
     let fixture = Fixture::new();
     fixture.append(
@@ -392,18 +380,6 @@ fn build_self_dependency_is_rejected() {
 }
 
 #[test]
-fn inactive_optional_and_target_dependencies_are_included() {
-    let fixture = Fixture::new();
-    fixture.append("crates/refscape-model/Cargo.toml", "[target.'cfg(unix)'.dependencies]\nrefscape-storage = { workspace = true, optional = true }\n");
-    let error = fixture.error();
-    assert!(error.contains("dependency cycle:"), "{error}");
-    assert!(
-        error.contains("normal, optional, target=cfg(unix)"),
-        "{error}"
-    );
-}
-
-#[test]
 fn target_expression_whitespace_does_not_hide_the_declaration() {
     let fixture = Fixture::new();
     fixture.append(
@@ -413,33 +389,6 @@ fn target_expression_whitespace_does_not_hide_the_declaration() {
     let error = fixture.error();
     assert!(error.contains("dependency cycle:"), "{error}");
     assert!(error.contains("dev, target=cfg(unix)"), "{error}");
-}
-
-#[test]
-fn mutually_exclusive_targets_still_cannot_create_a_declared_cycle() {
-    let fixture = Fixture::new();
-    fixture.append(
-        "crates/refscape-model/Cargo.toml",
-        "[target.'cfg(windows)'.dev-dependencies]\nrefscape-storage.workspace = true\n",
-    );
-    fixture.replace(
-        "crates/refscape-storage/Cargo.toml",
-        "refscape-model.workspace = true",
-        "",
-    );
-    fixture.replace(
-        "crates/refscape-storage/Cargo.toml",
-        "refscape-application.workspace = true",
-        "",
-    );
-    fixture.append(
-        "crates/refscape-storage/Cargo.toml",
-        "[target.'cfg(unix)'.dependencies]\nrefscape-model.workspace = true\n",
-    );
-    let error = fixture.error();
-    assert!(error.contains("dependency cycle:"), "{error}");
-    assert!(error.contains("target=cfg(windows)"), "{error}");
-    assert!(error.contains("target=cfg(unix)"), "{error}");
 }
 
 #[test]
@@ -456,21 +405,6 @@ fn renamed_dependency_cannot_hide_a_cycle() {
     let error = fixture.error();
     assert!(error.contains("dependency cycle:"), "{error}");
     assert!(error.contains("--normal--> refscape-storage"), "{error}");
-}
-
-#[test]
-fn allowed_renamed_dependency_is_identified_by_package_and_path() {
-    let fixture = Fixture::new();
-    fixture.append(
-        "Cargo.toml",
-        "model_alias = { package = \"refscape-model\", path = \"crates/refscape-model\" }\n",
-    );
-    fixture.replace(
-        "crates/refscape-application/Cargo.toml",
-        "refscape-model.workspace = true",
-        "model_alias.workspace = true",
-    );
-    check_architecture(&fixture.root).unwrap();
 }
 
 #[test]

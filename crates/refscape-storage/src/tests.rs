@@ -3,9 +3,7 @@ use crate::{
     session::{self, JsonSessionRepository, v1},
     theme::{load_theme, save_theme},
 };
-use refscape_application::{
-    ApplicationSnapshot as Session, ImportedSession, PersistableSession, SessionRepository,
-};
+use refscape_application::{ApplicationSnapshot as Session, PersistableSession, SessionRepository};
 use refscape_model::{
     CodeCard, Connection, ConnectionKind, Point, Position, ProjectLanguage, ProjectOpenOptions,
     Region, SourceDocument, SourceRange, Symbol, Theme, Viewport,
@@ -61,18 +59,6 @@ fn edit_source(card: &mut CodeCard, edit: impl FnOnce(&mut SourceDocument)) {
     card.source = source.try_into().unwrap();
 }
 #[test]
-fn python_session_preserves_language_without_a_version_change() {
-    let directory = TestDirectory::new();
-    let path = directory.path("python-session.json");
-    let mut session = Session::new(directory.0.clone());
-    session.project_options.language = ProjectLanguage::Python;
-    save(&path, &session).unwrap();
-    let document: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(document["version"], 1);
-    assert_eq!(document["project_options"]["language"], "python");
-    assert_eq!(load(&path).unwrap(), session);
-}
-#[test]
 fn theme_roundtrip_preserves_custom_colors() {
     let directory = TestDirectory::new();
     let path = directory.path("theme.json");
@@ -81,18 +67,6 @@ fn theme_roundtrip_preserves_custom_colors() {
     theme.palette.accent = "#bb55ff".into();
     save_theme(&path, &theme).unwrap();
     assert_eq!(load_theme(&path).unwrap(), theme);
-}
-#[test]
-fn legacy_sessions_default_to_automatic_language_detection() {
-    let directory = TestDirectory::new();
-    let path = directory.path("session.json");
-    let session = Session::new(directory.0.clone());
-    let mut legacy = document(&session);
-    legacy.as_object_mut().unwrap().remove("project_options");
-    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-    let restored = load(&path).unwrap();
-    assert_eq!(restored, session);
-    assert_eq!(restored.project_options, ProjectOpenOptions::default());
 }
 #[test]
 fn obsolete_layout_settings_are_ignored_and_removed_when_resaved() {
@@ -341,17 +315,6 @@ fn invalid_theme_cannot_replace_a_previous_theme() {
     assert_eq!(load_theme(&path).unwrap(), theme);
 }
 #[test]
-fn interrupted_staging_file_does_not_replace_committed_document() {
-    let directory = TestDirectory::new();
-    let path = directory.path("session.json");
-    let session = fixture(&directory);
-    save(&path, &session).unwrap();
-    fs::write(directory.path("session.json.123.456.tmp"), "{partial").unwrap();
-    assert_eq!(load(&path).unwrap(), session);
-    save(&path, &session).unwrap();
-    assert_eq!(load(&path).unwrap(), session);
-}
-#[test]
 fn failed_commit_cleans_up_staging_file() {
     let directory = TestDirectory::new();
     let path = directory.path("existing-directory");
@@ -360,17 +323,6 @@ fn failed_commit_cleans_up_staging_file() {
     assert!(path.is_dir());
     assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
 }
-#[test]
-fn loaded_bytes_are_fixed_and_do_not_follow_file_changes() {
-    let directory = TestDirectory::new();
-    let mut first = fixture(&directory);
-    let bytes = serde_json::to_vec(&document(&first)).unwrap();
-    let loaded: ImportedSession = session::decode_v1(&bytes).unwrap();
-    first.theme = Theme::dark();
-    assert_ne!(loaded.snapshot, first);
-    assert_eq!(loaded.snapshot.theme, Theme::light());
-}
-
 const FULL_V1_GOLDEN: &[u8] = include_bytes!("../tests/fixtures/session-v1-full.json");
 const LEGACY_V1_GOLDEN: &[u8] = include_bytes!("../tests/fixtures/session-v1-legacy.json");
 

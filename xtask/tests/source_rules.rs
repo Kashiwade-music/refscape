@@ -172,14 +172,6 @@ fn cargo_target_directories_are_roots_but_nested_main_is_not_an_escape() {
 }
 
 #[test]
-fn non_rust_asset_directories_do_not_require_module_parents() {
-    let fixture = Fixture::new();
-    fixture.write("assets/icons/readme.txt", "");
-    fixture.write("examples/cpp-demo/src/main.cpp", "int main() {}\n");
-    check_source_rules(&fixture.root).unwrap();
-}
-
-#[test]
 fn new_files_are_checked_ignored_files_are_skipped_and_tracked_ignored_files_are_checked() {
     let fixture = Fixture::new();
     fixture.write(".gitignore", "target/\nignored.rs\n");

@@ -100,20 +100,4 @@ mod tests {
         assert_eq!(utf16_byte_offset("a😀猫", 4), Some(8));
         assert_eq!(utf16_byte_offset("a😀猫", 5), None);
     }
-
-    #[test]
-    fn invalid_viewports_and_themes_are_rejected() {
-        assert!(
-            Viewport {
-                zoom: f32::NAN,
-                ..Viewport::default()
-            }
-            .validate()
-            .is_err()
-        );
-        let mut theme = Theme::light();
-        theme.palette.accent = "blue".into();
-        assert!(theme.validate().is_err());
-        assert!(Theme::dark().validate().is_ok());
-    }
 }

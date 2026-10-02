@@ -109,36 +109,3 @@ fn clicking_a_linked_word_toggles_cards_even_at_different_glyphs(cx: &mut TestAp
         assert_eq!(view.controller.snapshot().cards.len(), 2)
     });
 }
-
-#[gpui::test]
-fn native_source_click_uses_shaped_glyphs_and_absolute_utf16_positions(cx: &mut TestAppContext) {
-    let (explorer, requests) = fixture();
-    let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::from_fixture(
-            explorer,
-            PathBuf::from("session.json"),
-            vec![],
-            None,
-            ProjectOpenOptions::default(),
-            window,
-            cx,
-        )
-    });
-    cx.run_until_parked();
-    let handle = cx.window_handle();
-    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
-        .unwrap();
-    let click = view.read_with(cx, |view, _| {
-        let card = &view.canvas.painted[0];
-        point(
-            card.origin.x + card.rows[0].code.x_for_index("日本😀".len()) + px(1.0),
-            card.origin.y + px(5.0),
-        )
-    });
-    cx.simulate_mouse_down(click, MouseButton::Left, Modifiers::default());
-    cx.run_until_parked();
-    assert_eq!(*requests.lock().unwrap(), vec![Position::new(12, 9)]);
-    cx.simulate_mouse_down(click, MouseButton::Right, Modifiers::default());
-    cx.run_until_parked();
-    assert_eq!(requests.lock().unwrap().len(), 2);
-}

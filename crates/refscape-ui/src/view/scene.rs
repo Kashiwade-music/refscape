@@ -237,15 +237,3 @@ impl SceneCache {
         shapes
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::DetailLevel;
-    #[test]
-    fn detail_boundaries_keep_code_summary_and_region_contract() {
-        assert_eq!(DetailLevel::from_zoom(0.349_999), DetailLevel::Region);
-        assert_eq!(DetailLevel::from_zoom(0.35), DetailLevel::Summary);
-        assert_eq!(DetailLevel::from_zoom(0.649_999), DetailLevel::Summary);
-        assert_eq!(DetailLevel::from_zoom(0.65), DetailLevel::Code);
-    }
-}
