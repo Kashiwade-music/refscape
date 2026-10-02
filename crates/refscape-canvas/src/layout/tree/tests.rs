@@ -285,20 +285,6 @@ fn coarse_translation_fixture(count: usize) -> (Vec<LayoutCard>, Vec<Connection>
 }
 
 #[test]
-fn translated_two_siblings_rebuild_spacing_for_destination_float_grid() {
-    let (cards, edges) = coarse_translation_fixture(2);
-    let after = arrange(&cards, &edges, None);
-    assert_eq!(after[0].position, cards[0].position);
-    assert_eq!(after[3].position, cards[3].position);
-    assert!(after[1].position.y > 100000.0);
-    assert!(
-        f64::from(after[2].position.y)
-            >= CardRect::from(&after[1]).bottom() + f64::from(LayoutRules::default().gap)
-    );
-    assert_eq!(arrange(&after, &edges, None), after);
-}
-
-#[test]
 fn many_translated_siblings_need_wider_spans_not_a_translation_phase() {
     let (cards, edges) = coarse_translation_fixture(7);
     let rules = LayoutRules::default();

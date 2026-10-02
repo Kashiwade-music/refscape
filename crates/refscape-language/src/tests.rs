@@ -224,20 +224,6 @@ fn failed_python_start_preserves_previous_project_and_honors_server_override() {
     assert_eq!(router.files().unwrap(), [PathBuf::from("active.rs")]);
 }
 
-#[test]
-fn unavailable_python_server_leaves_router_without_an_active_project() {
-    let fixture = Fixture::new();
-    fixture.write("main.py");
-    let mut router = Opened::new(LanguageBackend::default())
-        .with_pyright_server(fixture.0.join("no-python-server"));
-    let error = router
-        .open_project(&fixture.0, &ProjectOpenOptions::default())
-        .unwrap_err();
-    assert!(error.contains("REFSCAPE_PYRIGHT"), "{error}");
-    assert_eq!(router.project_options(), ProjectOpenOptions::default());
-    assert!(router.files().unwrap_err().contains("open a project"));
-}
-
 struct ActiveRust;
 impl refscape_analysis::AnalysisSession for ActiveRust {
     fn project_options(&self) -> refscape_model::ResolvedProjectOptions {

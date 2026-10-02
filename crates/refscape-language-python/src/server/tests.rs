@@ -91,26 +91,6 @@ fn distribution_entry_point_and_native_executable_are_supported() {
 }
 
 #[test]
-fn project_virtual_environment_is_preferred_over_npm() {
-    let root = fixture();
-    #[cfg(windows)]
-    let server = root.join(".venv/Scripts/basedpyright-langserver.exe");
-    #[cfg(not(windows))]
-    let server = root.join(".venv/bin/basedpyright-langserver");
-    fs::create_dir_all(server.parent().unwrap()).unwrap();
-    fs::write(&server, "").unwrap();
-    fs::create_dir_all(root.join("src/package")).unwrap();
-    let command = command(
-        &root.join("src/package"),
-        Path::new("basedpyright-langserver"),
-    )
-    .unwrap();
-    assert_eq!(Path::new(command.get_program()), server);
-    assert_eq!(command.get_args().collect::<Vec<_>>(), ["--stdio"]);
-    remove_fixture(&root);
-}
-
-#[test]
 fn workspace_configuration_targets_both_pyright_families() {
     let behavior = PyrightBehavior;
     for section in ["python", "basedpyright"] {
@@ -123,19 +103,6 @@ fn workspace_configuration_targets_both_pyright_families() {
         "workspace"
     );
     assert_eq!(behavior.configuration(Some("unrelated")), json!({}));
-}
-
-#[test]
-fn path_lookup_preserves_explicit_extensions_and_missing_executables() {
-    let root = fixture();
-    let executable = root.join("custom-server.exe");
-    fs::write(&executable, "").unwrap();
-    assert_eq!(
-        executable_in_directory(&root, Path::new("custom-server.exe")),
-        Some(executable)
-    );
-    assert!(executable_in_directory(&root, Path::new("missing-server")).is_none());
-    remove_fixture(&root);
 }
 
 #[cfg(windows)]

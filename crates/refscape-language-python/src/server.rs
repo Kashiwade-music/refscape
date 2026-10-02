@@ -33,7 +33,7 @@ fn shim_cli(path: &Path) -> Option<PathBuf> {
         refscape_language_support::resolver::ServerKind::Python,
     )
 }
-#[cfg(test)]
+#[cfg(all(test, windows))]
 fn executable_in_directory(directory: &Path, executable: &Path) -> Option<PathBuf> {
     refscape_language_support::resolver::executable_candidates(directory, executable, cfg!(windows))
         .into_iter()
