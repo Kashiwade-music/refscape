@@ -1,5 +1,5 @@
 use super::*;
-use refscape_model::{SourceRange, Symbol};
+use refscape_model::{Point, Position};
 
 fn rect(x: f32, y: f32, w: f32, h: f32) -> CardRect {
     CardRect {
@@ -8,20 +8,16 @@ fn rect(x: f32, y: f32, w: f32, h: f32) -> CardRect {
         height: h,
     }
 }
-fn card(id: &str, x: f32, y: f32, w: f32, h: f32) -> CodeCard {
-    CodeCard {
+fn card(id: &str, x: f32, y: f32, w: f32, h: f32) -> LayoutCard {
+    LayoutCard {
         id: id.into(),
-        position: Point::new(x, y),
-        width: w,
-        height: h,
-        source: SourceDocument {
-            symbol: Symbol::file(format!("{id}.rs").into(), SourceRange::default()),
-            code: String::new(),
-            context: vec![],
-            code_start: None,
-            tokens: vec![],
-            folded: vec![],
-            expanded: vec![],
+        position: Point::new(x, y).try_into().unwrap(),
+        size: refscape_model::WorldSize::new(w, h).unwrap(),
+        order: NodeOrderKey {
+            path: format!("{id}.rs").into(),
+            range_start: Position::default(),
+            range_end: Position::default(),
+            symbol_id: format!("file:{id}.rs"),
         },
     }
 }
@@ -202,9 +198,7 @@ fn invalid_obstacle_and_lost_extent_rejected() {
     );
     assert!(rect(1e30, 0.0, 1.0, 1.0).validate().is_err());
     assert!(rect(f32::MAX, 0.0, f32::MAX, 1.0).validate().is_err());
-    let mut c = card("nan", 0.0, 0.0, 10.0, 128.0);
-    c.height = f32::NAN;
-    assert!(validate_layout(&[c], zero_gap()).is_err());
+    assert!(refscape_model::WorldSize::new(10.0, f32::NAN).is_err());
 }
 
 #[test]
@@ -214,7 +208,13 @@ fn resize_moves_direct_hits_only_and_shrink_moves_nobody() {
         card("hit", 0.0, 202.0, 100.0, 128.0),
         card("fixed", 0.0, 500.0, 100.0, 128.0),
     ];
-    let plan = plan_resize(&cards, "target", 100.0, 250.0, LayoutRules::default()).unwrap();
+    let plan = plan_resize(
+        &cards,
+        "target",
+        refscape_model::WorldSize::new(100.0, 250.0).unwrap(),
+        LayoutRules::default(),
+    )
+    .unwrap();
     assert_eq!(
         plan.changes
             .iter()
@@ -222,16 +222,20 @@ fn resize_moves_direct_hits_only_and_shrink_moves_nobody() {
             .collect::<Vec<_>>(),
         vec!["hit"]
     );
-    cards[0].height = 250.0;
-    plan.apply_positions(&mut cards, LayoutRules::default())
-        .unwrap();
+    cards[0].size = refscape_model::WorldSize::new(100.0, 250.0).unwrap();
+    apply(&plan, &mut cards, LayoutRules::default()).unwrap();
     assert_eq!(cards[0].position, Point::default());
     assert_eq!(cards[2].position, Point::new(0.0, 500.0));
     assert!(
-        plan_resize(&cards, "target", 100.0, 128.0, LayoutRules::default())
-            .unwrap()
-            .changes
-            .is_empty()
+        plan_resize(
+            &cards,
+            "target",
+            refscape_model::WorldSize::new(100.0, 128.0).unwrap(),
+            LayoutRules::default()
+        )
+        .unwrap()
+        .changes
+        .is_empty()
     );
 }
 
@@ -243,8 +247,7 @@ fn restore_preserves_initially_clear_card_and_is_idempotent() {
         card("clear", 0.0, 202.0, 100.0, 128.0),
     ];
     let plan = plan_restore_repair(&cards, LayoutRules::default()).unwrap();
-    plan.apply_positions(&mut cards, LayoutRules::default())
-        .unwrap();
+    apply(&plan, &mut cards, LayoutRules::default()).unwrap();
     assert_eq!(cards[2].position, Point::new(0.0, 202.0));
     assert!(
         plan_restore_repair(&cards, LayoutRules::default())
@@ -291,5 +294,131 @@ fn bounded_nearest_respects_upper_limit_and_safe_rounding() {
             zero_gap()
         )
         .is_err()
+    );
+}
+fn apply(plan: &LayoutDelta, cards: &mut [LayoutCard], rules: LayoutRules) -> Result<()> {
+    let mut after = cards.to_vec();
+    for change in &plan.changes {
+        let card = after
+            .iter_mut()
+            .find(|c| c.id == change.id)
+            .ok_or_else(|| crate::invalid("Missing card"))?;
+        if card.position != change.before {
+            return Err(crate::invalid("Stale plan"));
+        }
+        card.position = change.after;
+    }
+    validate_layout(&after, rules)?;
+    cards.clone_from_slice(&after);
+    Ok(())
+}
+
+#[test]
+fn cancellation_at_every_nearest_resize_restore_checkpoint_preserves_inputs() {
+    use std::cell::Cell;
+    let clear = vec![
+        card("target", 0.0, 0.0, 100.0, 128.0),
+        card("hit", 0.0, 202.0, 100.0, 128.0),
+        card("fixed", 0.0, 500.0, 100.0, 128.0),
+    ];
+    let overlap = vec![
+        card("first", 0.0, 0.0, 100.0, 128.0),
+        card("second", 0.0, 0.0, 100.0, 128.0),
+        card("clear", 0.0, 202.0, 100.0, 128.0),
+    ];
+    let occupied = [rect(0.0, 0.0, 100.0, 128.0), rect(0.0, 202.0, 100.0, 128.0)];
+    let run = |cancelled: &dyn Fn() -> bool| -> Result<()> {
+        super::nearest::nearest_vacant_position_cancellable(
+            Point::new(1.0, 1.0),
+            100.0,
+            128.0,
+            None,
+            None,
+            &occupied,
+            LayoutRules::default(),
+            cancelled,
+        )?;
+        super::repair::plan_resize_cancellable(
+            &clear,
+            "target",
+            refscape_model::WorldSize::new(100.0, 250.0).unwrap(),
+            LayoutRules::default(),
+            cancelled,
+        )?;
+        super::repair::plan_restore_repair_cancellable(
+            &overlap,
+            LayoutRules::default(),
+            cancelled,
+        )?;
+        Ok(())
+    };
+    let count = Cell::new(0);
+    run(&|| {
+        count.set(count.get() + 1);
+        false
+    })
+    .unwrap();
+    let before = (clear.clone(), overlap.clone(), occupied);
+    for stop in 1..=count.get() {
+        let calls = Cell::new(0);
+        assert!(
+            run(&|| {
+                calls.set(calls.get() + 1);
+                calls.get() >= stop
+            })
+            .is_err()
+        );
+        assert_eq!(
+            (&clear, &overlap, &occupied),
+            (&before.0, &before.1, &before.2)
+        );
+    }
+}
+
+#[test]
+fn operation_failures_keep_cancellation_and_timeout_typed() {
+    use refscape_model::{ErrorKind, OperationContext};
+    use std::time::Duration;
+    let operation = OperationContext::detached(Duration::from_secs(60));
+    operation.cancel.cancel();
+    assert_eq!(
+        plan_restore_repair_with_context(&[], LayoutRules::default(), &operation)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Cancelled
+    );
+    assert_eq!(
+        plan_arrange(
+            &LayoutInput {
+                cards: vec![],
+                connections: vec![]
+            },
+            None,
+            LayoutRules::default(),
+            &operation
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::Cancelled
+    );
+    assert_eq!(
+        nearest_vacant_position_with_context(
+            Point::default(),
+            refscape_model::WorldSize::new(10.0, 10.0).unwrap(),
+            None,
+            &[],
+            LayoutRules::default(),
+            &operation
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::Cancelled
+    );
+    let expired = OperationContext::detached(Duration::ZERO);
+    assert_eq!(
+        validate_layout_with_context(&[], LayoutRules::default(), &expired)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Timeout
     );
 }

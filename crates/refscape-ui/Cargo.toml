@@ -12,10 +12,11 @@ visual-tests = ["gpui/test-support", "gpui_platform/test-support"]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f8c2cc844057540ca1eac7de4f19f50d7597dead" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f8c2cc844057540ca1eac7de4f19f50d7597dead", features = ["font-kit", "x11", "wayland"] }
 refscape-application.workspace = true
-refscape-canvas.workspace = true
+
 refscape-model.workspace = true
 
 [dev-dependencies]
+refscape-application = { workspace = true, features = ["test-support"] }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f8c2cc844057540ca1eac7de4f19f50d7597dead", features = ["test-support"] }
 
 [lints]

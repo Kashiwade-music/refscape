@@ -1,7 +1,7 @@
 //! Real tsserver coverage. Install dependencies in examples/typescript-demo first.
-use refscape_application::ports::LanguageService;
+mod support;
 use refscape_language_typescript::TypeScript;
-use refscape_model::{Position, ProjectLanguage, ProjectOptions, Symbol};
+use refscape_model::{Position, ProjectLanguage, ProjectOpenOptions, Symbol};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -14,11 +14,11 @@ fn demo() -> PathBuf {
         .canonicalize()
         .unwrap()
 }
-fn backend() -> TypeScript {
+fn backend() -> support::Opened<TypeScript> {
     let executable = std::env::var_os("REFSCAPE_TYPESCRIPT_LANGUAGE_SERVER")
         .map(PathBuf::from)
         .unwrap_or_else(|| demo().join("node_modules/typescript-language-server/lib/cli.mjs"));
-    TypeScript::new(executable).with_timeout(Duration::from_secs(45))
+    support::Opened::new(TypeScript::new(executable)).with_timeout(Duration::from_secs(45))
 }
 fn find<'a>(symbols: &'a [Symbol], name: &str) -> &'a Symbol {
     fn search<'a>(symbols: &'a [Symbol], name: &str) -> Option<&'a Symbol> {
@@ -50,7 +50,7 @@ fn real_server_preserves_namespace_class_context_and_folded_source() {
     let root = demo();
     let mut language = backend();
     language
-        .open_project(&root, &ProjectOptions::default())
+        .open_project(&root, &ProjectOpenOptions::default())
         .unwrap();
     assert_eq!(
         language.project_options().language,
@@ -108,7 +108,7 @@ fn real_server_resolves_react_jsx_props_aliases_hooks_and_native_module_suffixes
     let root = demo();
     let mut language = backend();
     language
-        .open_project(&root, &ProjectOptions::default())
+        .open_project(&root, &ProjectOpenOptions::default())
         .unwrap();
     for (file, target) in [
         ("src/App.tsx", "src/CounterView.tsx"),
@@ -220,7 +220,7 @@ fn real_server_analyzes_unconfigured_typescript_and_javascript_and_external_edit
     .unwrap();
     let mut language = backend();
     language
-        .open_project(&root, &ProjectOptions::default())
+        .open_project(&root, &ProjectOpenOptions::default())
         .unwrap();
     let definitions = language
         .definitions(&app, position(&app, "scale(2)"))

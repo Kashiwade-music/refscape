@@ -7,9 +7,11 @@ publish.workspace = true
 
 [dependencies]
 refscape-model.workspace = true
-refscape-application.workspace = true
+refscape-analysis.workspace = true
+refscape-language-support.workspace = true
 refscape-lsp.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 
 [lints]
 workspace = true

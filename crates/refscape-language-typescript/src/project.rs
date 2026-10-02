@@ -1,14 +1,11 @@
 //! File discovery only; TypeScript owns tsconfig/jsconfig and module resolution.
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 
 pub fn supports(root: &Path) -> Result<bool, String> {
     if root.join("tsconfig.json").is_file() || root.join("jsconfig.json").is_file() {
         return Ok(true);
     }
-    Ok(!files(root)?.is_empty())
+    Ok(!refscape_language_support::catalog::walk(root, POLICY, true)?.is_empty())
 }
 
 pub(crate) fn language_id(path: &Path) -> &'static str {
@@ -20,67 +17,48 @@ pub(crate) fn language_id(path: &Path) -> &'static str {
     }
 }
 
+pub const POLICY: refscape_language_support::catalog::WalkPolicy =
+    refscape_language_support::catalog::WalkPolicy {
+        extensions: &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"],
+        excluded: &[
+            "node_modules",
+            ".git",
+            ".hg",
+            ".svn",
+            ".refscape",
+            ".yarn",
+            ".next",
+            ".expo",
+            "target",
+            "build",
+            "dist",
+            "coverage",
+            "Pods",
+            ".gradle",
+            ".venv",
+            "venv",
+            ".env",
+            "env",
+            "__pypackages__",
+            "site-packages",
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+            ".pytype",
+            ".tox",
+            ".nox",
+        ],
+        case_insensitive: false,
+        symlink_files: false,
+        exclude_virtual_environments: true,
+        canonical_paths: false,
+    };
+#[cfg(test)]
+use std::path::PathBuf;
+#[cfg(test)]
 pub(crate) fn files(root: &Path) -> Result<Vec<PathBuf>, String> {
-    fn collect(root: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
-        for entry in fs::read_dir(root)
-            .map_err(|error| format!("cannot list {}: {error}", root.display()))?
-        {
-            let entry = entry.map_err(|error| error.to_string())?;
-            let kind = entry.file_type().map_err(|error| error.to_string())?;
-            let path = entry.path();
-            if kind.is_symlink() {
-                continue;
-            }
-            if kind.is_dir() {
-                if !matches!(
-                    entry.file_name().to_str(),
-                    Some(
-                        "node_modules"
-                            | ".git"
-                            | ".hg"
-                            | ".svn"
-                            | ".refscape"
-                            | ".yarn"
-                            | ".next"
-                            | ".expo"
-                            | "target"
-                            | "build"
-                            | "dist"
-                            | "coverage"
-                            | "Pods"
-                            | ".gradle"
-                            | ".venv"
-                            | "venv"
-                            | ".env"
-                            | "env"
-                            | "__pypackages__"
-                            | "site-packages"
-                            | "__pycache__"
-                            | ".pytest_cache"
-                            | ".mypy_cache"
-                            | ".ruff_cache"
-                            | ".pytype"
-                            | ".tox"
-                            | ".nox"
-                    )
-                ) && !path.join("pyvenv.cfg").is_file()
-                {
-                    collect(&path, output)?;
-                }
-            } else if matches!(
-                path.extension().and_then(|extension| extension.to_str()),
-                Some("ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs")
-            ) {
-                output.push(path);
-            }
-        }
-        Ok(())
-    }
-    let mut output = Vec::new();
-    collect(root, &mut output)?;
-    output.sort();
-    Ok(output)
+    refscape_language_support::catalog::walk(root, POLICY, false)
 }
-
 #[cfg(test)]
 mod tests;

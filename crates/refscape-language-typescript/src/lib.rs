@@ -1,175 +1,144 @@
-//! TypeScript/JavaScript and JSX analysis through the official tsserver engine.
+//! TypeScript/JavaScript policy for the shared opened runtime.
 mod project;
 mod server;
-
-use refscape_application::ports::LanguageService;
-use refscape_lsp::transport::DefaultServerBehavior;
-use refscape_lsp::{LspSession, ServerConfiguration};
-use refscape_model::{
-    Position, ProjectCrate, ProjectLanguage, ProjectOptions, SourceDocument, SourceRange, Symbol,
+pub use project::{POLICY as FILE_POLICY, supports};
+use refscape_analysis::{
+    AnalysisFactory, AnalysisResult, ErrorKind, OperationContext, PreparedProject, RefscapeError,
 };
+use refscape_language_support::resolver::{ConfiguredExecutable, ServerKind, resolve};
+use refscape_language_support::{
+    EnvironmentSnapshot, LspAnalysisSession, Metadata, MetadataProvider, SearchMergePolicy,
+};
+use refscape_lsp::{ServerConfiguration, transport::DefaultServerBehavior};
+use refscape_model::{ProjectLanguage, ProjectOpenOptions};
 use serde_json::json;
-use std::{
-    env,
-    path::{Path, PathBuf},
-    time::Duration,
-};
-
-pub use project::supports;
-
+use std::path::{Path, PathBuf};
+#[derive(Clone)]
 pub struct TypeScript {
-    executable: PathBuf,
-    timeout: Duration,
-    active: Option<ActiveProject>,
+    executable: ConfiguredExecutable,
+    environment: EnvironmentSnapshot,
+    discovery_files: Option<Vec<PathBuf>>,
 }
-struct ActiveProject {
-    root: PathBuf,
-    session: LspSession,
-}
-
 impl Default for TypeScript {
     fn default() -> Self {
-        Self::new(
-            env::var_os("REFSCAPE_TYPESCRIPT_LANGUAGE_SERVER")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| "typescript-language-server".into()),
+        let environment = EnvironmentSnapshot::capture();
+        Self::from_environment(
+            environment.configured_executable(
+                "REFSCAPE_TYPESCRIPT_LANGUAGE_SERVER",
+                "typescript-language-server",
+            ),
+            environment,
         )
     }
 }
 impl TypeScript {
     pub fn new(executable: impl Into<PathBuf>) -> Self {
-        Self {
-            executable: executable.into(),
-            timeout: Duration::from_secs(120),
-            active: None,
-        }
+        Self::from_environment(
+            ConfiguredExecutable::explicit(executable),
+            EnvironmentSnapshot::capture(),
+        )
     }
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+    pub fn with_discovery_files(mut self, files: Vec<PathBuf>) -> Self {
+        self.discovery_files = Some(files);
         self
     }
-    fn session(&mut self) -> Result<&mut LspSession, String> {
-        self.active
-            .as_mut()
-            .map(|active| &mut active.session)
-            .ok_or_else(|| "open a project before requesting analysis".into())
-    }
-    // tsserver workspace search operates on projects containing open documents.
-    // Load each document through its own tsconfig, including separate monorepo packages.
-    fn index_documents(&mut self, query: Option<&str>) -> Result<Vec<Symbol>, String> {
-        fn matches(symbols: &[Symbol], query: &str, output: &mut Vec<Symbol>) {
-            for symbol in symbols {
-                if symbol.name.to_lowercase().contains(query) {
-                    output.push(symbol.clone());
-                }
-                matches(&symbol.children, query, output);
-            }
+    pub fn from_environment(
+        executable: impl Into<ConfiguredExecutable>,
+        environment: EnvironmentSnapshot,
+    ) -> Self {
+        Self {
+            executable: executable.into(),
+            environment,
+            discovery_files: None,
         }
-        let mut symbols = Vec::new();
-        for file in self.files()? {
-            let document = self.symbols(&file)?;
-            if let Some(query) = query {
-                matches(&document, query, &mut symbols);
-            }
-        }
-        Ok(symbols)
     }
 }
-impl LanguageService for TypeScript {
-    fn open_project(&mut self, root: &Path, options: &ProjectOptions) -> Result<(), String> {
+struct Provider {
+    root: PathBuf,
+    initial_files: Option<Vec<PathBuf>>,
+}
+impl MetadataProvider for Provider {
+    fn refresh(&mut self, context: &OperationContext) -> AnalysisResult<Metadata> {
+        context.check()?;
+        let listing = match self.initial_files.take() {
+            Some(files) => Ok(files),
+            None => refscape_language_support::catalog::walk_with_context(
+                &self.root,
+                FILE_POLICY,
+                false,
+                context,
+            ),
+        };
+        let (files, catalog_error) = match listing {
+            Ok(files) => (files, None),
+            Err(error) => (vec![], Some(error)),
+        };
+        Ok(Metadata {
+            options: ProjectOpenOptions {
+                language: ProjectLanguage::TypeScript,
+                compilation_database: None,
+            }
+            .try_into()?,
+            seed: files.first().cloned(),
+            files,
+            catalog_error,
+            crates: vec![],
+            search: SearchMergePolicy::WorkspaceFirst,
+            prewarm_references: true,
+            revision: 0,
+        })
+    }
+}
+impl AnalysisFactory for TypeScript {
+    fn prepare(
+        &self,
+        root: &Path,
+        options: &ProjectOpenOptions,
+        context: &OperationContext,
+    ) -> AnalysisResult<PreparedProject> {
+        context.check()?;
         if !matches!(
             options.language,
             ProjectLanguage::Auto | ProjectLanguage::TypeScript
         ) || options.compilation_database.is_some()
         {
-            return Err("TypeScript analyzes TypeScript/JavaScript projects; compilation databases apply only to C/C++".into());
-        }
-        let root = root
-            .canonicalize()
-            .map_err(|error| format!("cannot open {}: {error}", root.display()))?;
-        if !root.is_dir() {
-            return Err(format!("{} is not a source folder", root.display()));
-        }
-        if options.language == ProjectLanguage::Auto && !supports(&root)? {
-            return Err(format!(
-                "{} does not contain a TypeScript/JavaScript project",
-                root.display()
+            return Err(RefscapeError::new(
+                ErrorKind::InvalidData,
+                "TypeScript analyzes TypeScript/JavaScript projects; compilation databases apply only to C/C++",
             ));
         }
-        let mut command = server::command(&root, &self.executable)?;
-        let configuration = ServerConfiguration {
+        let root = root.canonicalize().map_err(|e| {
+            RefscapeError::new(
+                ErrorKind::Io,
+                format!("cannot open {}: {e}", root.display()),
+            )
+        })?;
+        if !root.is_dir() {
+            return Err(RefscapeError::new(
+                ErrorKind::InvalidData,
+                format!("{} is not a source folder", root.display()),
+            ));
+        }
+        if options.language == ProjectLanguage::Auto && !supports(&root)? {
+            return Err(RefscapeError::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "{} does not contain a TypeScript/JavaScript project",
+                    root.display()
+                ),
+            ));
+        }
+        let launch = resolve(
+            &root,
+            &self.executable,
+            ServerKind::TypeScript,
+            &self.environment,
+        )?;
+        LspAnalysisSession::prepare(root.clone(), launch.command(), ServerConfiguration {
             name: "typescript-language-server".into(),
             installation_hint: "Install Node.js and npm install -g typescript typescript-language-server, or set REFSCAPE_TYPESCRIPT_LANGUAGE_SERVER to the server executable or lib/cli.mjs (REFSCAPE_NODE selects Node.js)".into(),
             initialization_options: json!({"hostInfo":"Refscape","disableAutomaticTypingAcquisition":true,"tsserver":{"useSyntaxServer":"never"}}),
-            experimental_capabilities: json!({}),
-            language_id: project::language_id,
-            behavior: Box::new(DefaultServerBehavior),
-        };
-        let mut session =
-            LspSession::start(root.clone(), &mut command, self.timeout, configuration)?;
-        if let Some(seed) = project::files(&root)?.first() {
-            session.symbols(seed)?;
-        }
-        self.active = Some(ActiveProject { root, session });
-        Ok(())
-    }
-    fn project_options(&self) -> ProjectOptions {
-        if self.active.is_some() {
-            ProjectOptions {
-                language: ProjectLanguage::TypeScript,
-                compilation_database: None,
-            }
-        } else {
-            ProjectOptions::default()
-        }
-    }
-    fn project_crates(&mut self) -> Result<Vec<ProjectCrate>, String> {
-        Ok(vec![])
-    }
-    fn files(&mut self) -> Result<Vec<PathBuf>, String> {
-        project::files(&self.active.as_ref().ok_or("no project open")?.root)
-    }
-    fn search(&mut self, query: &str) -> Result<Vec<Symbol>, String> {
-        let normalized = query.to_lowercase();
-        let documents = self.index_documents(Some(&normalized))?;
-        let mut symbols = self.session()?.search(query)?;
-        symbols.extend(documents);
-        symbols.sort_by(|left, right| {
-            (&left.path, left.range.start, left.range.end, &left.name).cmp(&(
-                &right.path,
-                right.range.start,
-                right.range.end,
-                &right.name,
-            ))
-        });
-        let mut seen = std::collections::BTreeSet::new();
-        symbols.retain(|symbol| seen.insert(symbol.id.clone()));
-        Ok(symbols)
-    }
-    fn symbols(&mut self, path: &Path) -> Result<Vec<Symbol>, String> {
-        self.session()?.symbols(path)
-    }
-    fn source(&mut self, symbol: &Symbol) -> Result<SourceDocument, String> {
-        self.session()?.source(symbol)
-    }
-    fn definitions(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>, String> {
-        self.session()?.definitions(path, position)
-    }
-    fn references(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>, String> {
-        self.index_documents(None)?;
-        self.session()?.references(path, position)
-    }
-    fn type_definitions(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>, String> {
-        self.session()?.type_definitions(path, position)
-    }
-    fn document_highlights(
-        &mut self,
-        path: &Path,
-        position: Position,
-    ) -> Result<Vec<SourceRange>, String> {
-        self.session()?.document_highlights(path, position)
-    }
-    fn hover(&mut self, path: &Path, position: Position) -> Result<Option<String>, String> {
-        self.session()?.hover(path, position)
+            experimental_capabilities: json!({}), language_id: project::language_id, behavior: Box::new(DefaultServerBehavior),
+        }, Box::new(Provider { root, initial_files: self.discovery_files.clone() }), context)
     }
 }

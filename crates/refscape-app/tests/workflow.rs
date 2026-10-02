@@ -3,12 +3,14 @@
 use std::{
     env, fs,
     path::PathBuf,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-use refscape_application::explorer::Explorer;
+#[path = "common/workflow.rs"]
+mod common;
+use common::Workflow;
 use refscape_language::LanguageBackend;
-use refscape_model::{ConnectionKind, Point, Position, ProjectOptions, Theme};
+use refscape_model::{ConnectionKind, Point, Position, ProjectOpenOptions, Theme};
 use refscape_storage::session::JsonSessionRepository;
 
 struct Fixture {
@@ -66,10 +68,10 @@ impl Drop for Fixture {
 #[ignore = "requires rust-analyzer; run cargo test -p refscape-app --test workflow -- --ignored"]
 fn real_project_navigation_and_named_session_restore() {
     let fixture = Fixture::new();
-    let language = LanguageBackend::default().with_timeout(Duration::from_secs(60));
-    let mut explorer = Explorer::new(language, JsonSessionRepository);
+    let language = LanguageBackend::default();
+    let mut explorer = Workflow::new(language, JsonSessionRepository);
     explorer
-        .open_project(&fixture.root, &ProjectOptions::default())
+        .open_project(&fixture.root, &ProjectOpenOptions::default())
         .unwrap();
     assert_eq!(explorer.files().unwrap().len(), 2);
 
@@ -108,7 +110,7 @@ fn real_project_navigation_and_named_session_restore() {
     assert!(references.contains(&origin));
     assert_eq!(explorer.session().cards.len(), 2);
     assert_eq!(explorer.session().connections.len(), 2);
-    for original in &before_reuse {
+    for original in before_reuse.iter() {
         assert_eq!(
             explorer
                 .session()
@@ -138,7 +140,7 @@ fn real_project_navigation_and_named_session_restore() {
 
     let before_add = explorer.session().cards.clone();
     let whole_file = explorer.add_file(&lib, Point::new(80.0, 600.0)).unwrap();
-    for original in &before_add {
+    for original in before_add.iter() {
         assert_eq!(
             explorer
                 .session()
@@ -156,7 +158,10 @@ fn real_project_navigation_and_named_session_restore() {
         .iter()
         .find(|card| card.id == whole_file)
         .unwrap();
-    assert_eq!(file_card.source.code, fs::read_to_string(&lib).unwrap());
+    assert_eq!(
+        file_card.source.code.as_ref(),
+        fs::read_to_string(&lib).unwrap()
+    );
     assert_eq!(file_card.source.symbol.range.start, Position::new(0, 0));
     assert_eq!(file_card.source.symbol.range.end, Position::new(4, 0));
     assert_eq!(
@@ -172,7 +177,7 @@ fn real_project_navigation_and_named_session_restore() {
     assert!(explorer.arrange_layout(Some(&origin)).unwrap());
     assert_eq!(explorer.session().connections, before_arrange.connections);
     assert_eq!(explorer.session().viewport, before_arrange.viewport);
-    for original in &before_arrange.cards {
+    for original in before_arrange.cards.iter() {
         let current = explorer
             .session()
             .cards
@@ -228,7 +233,7 @@ fn real_project_navigation_and_named_session_restore() {
             .session()
             .regions
             .iter()
-            .all(|region| !region.card_ids.contains(&answer))
+            .all(|region| !region.card_ids.iter().any(|id| id == &answer))
     );
     explorer.pan(Point::new(200.0, 200.0)).unwrap();
     explorer.set_theme(Theme::dark()).unwrap();

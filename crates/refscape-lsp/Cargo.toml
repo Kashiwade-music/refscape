@@ -7,6 +7,8 @@ publish.workspace = true
 
 [dependencies]
 refscape-model.workspace = true
+refscape-analysis.workspace = true
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "process", "io-util", "sync", "time", "macros"] }
 serde.workspace = true
 serde_json.workspace = true
 

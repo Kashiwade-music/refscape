@@ -7,12 +7,16 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use refscape_application::explorer::Explorer;
+#[path = "common/workflow.rs"]
+mod common;
+use common::Workflow;
 use refscape_language::LanguageBackend;
-use refscape_model::{ConnectionKind, Point, Position, ProjectLanguage, ProjectOptions, Symbol};
+use refscape_model::{
+    ConnectionKind, Point, Position, ProjectLanguage, ProjectOpenOptions, Symbol,
+};
 use refscape_storage::session::JsonSessionRepository;
 
-type TestExplorer = Explorer<LanguageBackend, JsonSessionRepository>;
+type TestExplorer = Workflow;
 
 struct Fixture {
     temp: PathBuf,
@@ -126,7 +130,7 @@ fn compiler(cpp: bool) -> PathBuf {
 }
 
 fn explorer() -> TestExplorer {
-    Explorer::new(
+    Workflow::new(
         LanguageBackend::new("rust-analyzer", clangd()),
         JsonSessionRepository,
     )
@@ -155,7 +159,7 @@ fn arrange_and_undo(explorer: &mut TestExplorer, root: &str) {
     assert!(explorer.arrange_layout(Some(root)).unwrap());
     assert_eq!(explorer.session().connections, before.connections);
     assert_eq!(explorer.session().viewport, before.viewport);
-    for original in &before.cards {
+    for original in before.cards.iter() {
         let current = explorer
             .session()
             .cards
@@ -220,7 +224,7 @@ fn named_symbol(explorer: &mut TestExplorer, path: &Path, name: &str) -> Symbol 
 #[ignore = "requires clangd; run cargo test -p refscape-app --test cpp_workflow -- --ignored"]
 fn real_c_and_cpp_navigation_and_external_database_session_restore() {
     let fixture = Fixture::new();
-    let options = ProjectOptions {
+    let options = ProjectOpenOptions {
         language: ProjectLanguage::Cpp,
         compilation_database: Some(fixture.database.clone()),
     };
@@ -344,7 +348,7 @@ fn real_c_and_cpp_navigation_and_external_database_session_restore() {
             .contains(&scale)
     );
     assert_eq!(explorer.session().cards.len(), count);
-    for original in &before_reuse {
+    for original in before_reuse.iter() {
         assert_eq!(
             explorer
                 .session()
@@ -429,7 +433,7 @@ fn simple_c_project_opens_without_a_compilation_database() {
     .unwrap();
     let mut explorer = explorer();
     explorer
-        .open_project(&fixture.root, &ProjectOptions::default())
+        .open_project(&fixture.root, &ProjectOpenOptions::default())
         .unwrap();
     assert_eq!(
         explorer.session().project_options.language,
@@ -470,4 +474,101 @@ fn simple_c_project_opens_without_a_compilation_database() {
     arrange_and_undo(&mut explorer, &entry);
     explorer.session().validate().unwrap();
     drop(explorer);
+}
+
+#[test]
+#[ignore = "requires clangd"]
+fn real_cpp_navigation_preserves_source_order_placement_and_fold_projection() {
+    let fixture = Fixture::new();
+    let text = "namespace outer {\n    namespace inner {\n        class Project {\n        public:\n            int first() const { return 1; }\n\n            int options() const {\n                return 42;\n            }\n        };\n        struct Settings {\n            int value() const { return 7; }\n        };\n\n        int helper() { return 3; }\n    }\n}\nint main() {\n    outer::inner::Project project;\n    int earlier = project.first();\n    return project.options() + earlier;\n}\n";
+    let path = fixture.root.join("main.cpp");
+    fs::write(&path, text).unwrap();
+    fs::write(
+        fixture.root.join(".clangd"),
+        "CompileFlags:\n  Add: [-std=c++17]\n",
+    )
+    .unwrap();
+    let mut workflow = explorer();
+    workflow
+        .open_project(
+            &fixture.root,
+            &ProjectOpenOptions {
+                language: ProjectLanguage::Cpp,
+                compilation_database: None,
+            },
+        )
+        .unwrap();
+    let main = named_symbol(&mut workflow, &path, "main");
+    let origin = workflow.add_symbol(main, Point::default()).unwrap();
+    let later = workflow
+        .expand_definition(&origin, position(&path, "options() +"))
+        .unwrap()
+        .remove(0);
+    let earlier = workflow
+        .expand_definition(&origin, position(&path, "first();"))
+        .unwrap()
+        .remove(0);
+    let cards = &workflow.session().cards;
+    let earlier = cards.iter().find(|card| card.id == earlier).unwrap();
+    let later_card = cards.iter().find(|card| card.id == later).unwrap();
+    assert_eq!(earlier.position.x, later_card.position.x);
+    assert!(earlier.position.y + earlier.display_height() < later_card.position.y);
+    assert_eq!(earlier.source.context.len(), 3);
+    assert_eq!(later_card.source.context.len(), 3);
+    let target = workflow
+        .expand_definition(&later, position(&path, "Project {"))
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        workflow
+            .session()
+            .cards
+            .iter()
+            .find(|card| card.id == target)
+            .unwrap()
+            .source
+            .symbol
+            .name,
+        "Project"
+    );
+    workflow.expand_context(&later, 2).unwrap();
+    let card = workflow
+        .session()
+        .cards
+        .iter()
+        .find(|card| card.id == later)
+        .unwrap();
+    assert!(card.source.export_context()[2].code.contains("int first()"));
+    assert!(
+        card.source
+            .contains_display_position(position(&path, "first() const"))
+    );
+    assert_eq!(
+        card.source.display_row(position(&path, "options() const")),
+        Some(6)
+    );
+    let expanded = card.source.clone();
+    workflow.collapse_context(&later, 2).unwrap();
+    let folded = &workflow
+        .session()
+        .cards
+        .iter()
+        .find(|card| card.id == later)
+        .unwrap()
+        .source;
+    assert_eq!(folded.context[2].code, "        class Project {");
+    assert!(!folded.contains_display_position(position(&path, "first() const")));
+    assert!(folded.export_expanded().is_empty());
+    workflow.expand_context(&later, 2).unwrap();
+    assert_eq!(
+        workflow
+            .session()
+            .cards
+            .iter()
+            .find(|card| card.id == later)
+            .unwrap()
+            .source,
+        expanded
+    );
+    workflow.session().validate().unwrap();
 }

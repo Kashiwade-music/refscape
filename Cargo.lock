@@ -3181,6 +3181,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mio"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
+dependencies = [
+ "libc",
+ "wasi",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4537,9 +4548,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "refscape-analysis"
+version = "0.1.0"
+dependencies = [
+ "refscape-model",
+]
+
+[[package]]
 name = "refscape-app"
 version = "0.1.0"
 dependencies = [
+ "refscape-analysis",
  "refscape-application",
  "refscape-language",
  "refscape-model",
@@ -4551,6 +4570,7 @@ dependencies = [
 name = "refscape-application"
 version = "0.1.0"
 dependencies = [
+ "refscape-analysis",
  "refscape-canvas",
  "refscape-model",
 ]
@@ -4566,10 +4586,11 @@ dependencies = [
 name = "refscape-language"
 version = "0.1.0"
 dependencies = [
- "refscape-application",
+ "refscape-analysis",
  "refscape-language-cpp",
  "refscape-language-python",
  "refscape-language-rust",
+ "refscape-language-support",
  "refscape-language-typescript",
  "refscape-model",
 ]
@@ -4578,9 +4599,11 @@ dependencies = [
 name = "refscape-language-cpp"
 version = "0.1.0"
 dependencies = [
- "refscape-application",
+ "refscape-analysis",
+ "refscape-language-support",
  "refscape-lsp",
  "refscape-model",
+ "serde",
  "serde_json",
 ]
 
@@ -4588,7 +4611,8 @@ dependencies = [
 name = "refscape-language-python"
 version = "0.1.0"
 dependencies = [
- "refscape-application",
+ "refscape-analysis",
+ "refscape-language-support",
  "refscape-lsp",
  "refscape-model",
  "serde_json",
@@ -4598,7 +4622,8 @@ dependencies = [
 name = "refscape-language-rust"
 version = "0.1.0"
 dependencies = [
- "refscape-application",
+ "refscape-analysis",
+ "refscape-language-support",
  "refscape-lsp",
  "refscape-model",
  "serde",
@@ -4606,10 +4631,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "refscape-language-support"
+version = "0.1.0"
+dependencies = [
+ "refscape-analysis",
+ "refscape-lsp",
+ "refscape-model",
+ "serde_json",
+]
+
+[[package]]
 name = "refscape-language-typescript"
 version = "0.1.0"
 dependencies = [
- "refscape-application",
+ "refscape-analysis",
+ "refscape-language-support",
  "refscape-lsp",
  "refscape-model",
  "serde_json",
@@ -4619,17 +4655,16 @@ dependencies = [
 name = "refscape-lsp"
 version = "0.1.0"
 dependencies = [
+ "refscape-analysis",
  "refscape-model",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
 name = "refscape-model"
 version = "0.1.0"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "refscape-storage"
@@ -4648,7 +4683,6 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "refscape-application",
- "refscape-canvas",
  "refscape-model",
 ]
 
@@ -5630,7 +5664,24 @@ version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
+ "bytes",
+ "libc",
+ "mio",
  "pin-project-lite",
+ "signal-hook-registry",
+ "tokio-macros",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
 ]
 
 [[package]]

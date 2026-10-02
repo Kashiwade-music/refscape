@@ -5,8 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+test-support = []
+work-counters = []
+
 [dependencies]
 refscape-model.workspace = true
+refscape-analysis.workspace = true
 refscape-canvas.workspace = true
 
 [lints]

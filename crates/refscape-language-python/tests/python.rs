@@ -1,7 +1,7 @@
 //! Real basedpyright coverage. Set REFSCAPE_PYRIGHT or install basedpyright first.
-use refscape_application::ports::LanguageService;
-use refscape_language_python::Pyright;
-use refscape_model::{Position, ProjectLanguage, ProjectOptions, Symbol};
+mod support;
+use refscape_language_python::Python;
+use refscape_model::{Position, ProjectLanguage, ProjectOpenOptions, Symbol};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -15,8 +15,8 @@ fn demo() -> PathBuf {
         .unwrap()
 }
 
-fn backend() -> Pyright {
-    Pyright::default().with_timeout(Duration::from_secs(45))
+fn backend() -> support::Opened<Python> {
+    support::Opened::new(Python::default()).with_timeout(Duration::from_secs(45))
 }
 
 fn find<'a>(symbols: &'a [Symbol], name: &str) -> &'a Symbol {
@@ -50,7 +50,7 @@ fn real_server_provides_semantic_variables_types_and_nested_context() {
     let root = demo();
     let mut language = backend();
     language
-        .open_project(&root, &ProjectOptions::default())
+        .open_project(&root, &ProjectOpenOptions::default())
         .unwrap();
     assert_eq!(language.project_options().language, ProjectLanguage::Python);
     let model = root.join("model.py");
@@ -88,7 +88,14 @@ fn real_server_provides_semantic_variables_types_and_nested_context() {
     let run = language.source(find(&symbols, "run")).unwrap();
     run.validate().unwrap();
     let counter = position(&pipeline, "counter, config)");
-    assert!(run.variable_token(counter).is_some(), "{:?}", run.tokens);
+    assert!(
+        refscape_model::CardSource::try_from(run.clone())
+            .unwrap()
+            .variable_token(counter)
+            .is_some(),
+        "{:?}",
+        run.tokens
+    );
     assert!(
         language
             .type_definitions(&pipeline, counter)
@@ -114,7 +121,7 @@ fn real_server_searches_and_finds_callers_in_previously_unopened_files() {
     let main = root.join("main.py");
     let mut language = backend();
     language
-        .open_project(&root, &ProjectOptions::default())
+        .open_project(&root, &ProjectOpenOptions::default())
         .unwrap();
     let references = language
         .references(&model, position(&model, "load_config()"))
@@ -176,7 +183,7 @@ fn real_server_analyzes_unconfigured_python_stubs_unicode_and_external_edits() {
     fs::write(&stub, "def describe(value: int) -> str: ...\n").unwrap();
     let mut language = backend();
     language
-        .open_project(&root, &ProjectOptions::default())
+        .open_project(&root, &ProjectOpenOptions::default())
         .unwrap();
     assert_eq!(language.files().unwrap().len(), 3);
     assert!(

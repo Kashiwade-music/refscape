@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "project_root": "golden-project",
+  "project_options": {"language": "cpp", "compilation_database": "golden-project/build/compile_commands.json"},
+  "cards": [
+    {
+      "id": "saved:日本語:second-before-first",
+      "source": {
+        "symbol": {"id": "official:run", "name": "日本語", "kind": "function", "path": "golden-project/main.cpp", "range": {"start": {"line": 4, "character": 1}, "end": {"line": 5, "character": 0}}, "selection_range": {"start": {"line": 4, "character": 4}, "end": {"line": 4, "character": 7}}, "children": []},
+        "code": "\tfn 日本語() {😀}\r\n",
+        "tokens": [{"line": 4, "start": 4, "length": 3, "kind": "function", "modifiers": ["declaration"]}],
+        "context": [{"start_line": 0, "code": "impl Type {"}],
+        "code_start": {"line": 4, "character": 0},
+        "folded": [{"start_line": 1, "code": "\t// gap\r\n\r\n\r\n"}],
+        "expanded": []
+      },
+      "position": {"x": -37.5, "y": 120.25}, "width": 620.0, "height": 320.0
+    },
+    {
+      "id": "saved:alpha",
+      "source": {
+        "symbol": {"id": "official:child", "name": "child", "kind": "function", "path": "golden-project/child.cpp", "range": {"start": {"line": 6, "character": 4}, "end": {"line": 6, "character": 17}}, "selection_range": {"start": {"line": 6, "character": 7}, "end": {"line": 6, "character": 12}}, "children": []},
+        "code": "    fn child() {}",
+        "tokens": [{"line": 6, "start": 7, "length": 5, "kind": "function", "modifiers": []}],
+        "context": [{"start_line": 0, "code": "mod nested {\n    fn old() {}\n\n\n\n\n"}],
+        "code_start": {"line": 6, "character": 0},
+        "folded": [],
+        "expanded": [{"start_line": 1, "code": "    fn old() {}\n\n\n\n\n"}]
+      },
+      "position": {"x": 760.0, "y": -90.5}, "width": 580.0, "height": 420.0
+    }
+  ],
+  "connections": [
+    {"id": "edge:reference-first", "from": "saved:alpha", "to": "saved:日本語:second-before-first", "kind": "reference", "source": {"line": 6, "character": 7}},
+    {"id": "edge:definition-second", "from": "saved:日本語:second-before-first", "to": "saved:alpha", "kind": "definition", "source": {"line": 4, "character": 4}},
+    {"id": "edge:type-third", "from": "saved:日本語:second-before-first", "to": "saved:alpha", "kind": "type_definition", "source": {"line": 4, "character": 4}}
+  ],
+  "regions": [{"id": "module:golden", "label": "保存済み領域", "path": "golden-project", "card_ids": ["saved:alpha", "saved:日本語:second-before-first"]}],
+  "viewport": {"offset": {"x": -200.5, "y": 80.25}, "zoom": 0.75},
+  "theme": {"name": "Golden custom", "palette": {"background": "#010203", "surface": "#111213", "surface_alt": "#212223", "text": "#f1f2f3", "muted": "#818283", "accent": "#aa55ff", "border": "#313233", "connection": "#414243", "syntax_keyword": "#515253", "syntax_string": "#616263", "syntax_type": "#717273", "syntax_function": "#919293"}}
+}

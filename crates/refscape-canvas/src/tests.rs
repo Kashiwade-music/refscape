@@ -25,8 +25,10 @@ fn card(id: &str, position: Point) -> CodeCard {
             ),
             code: "fn example() {}".into(),
             tokens: Vec::new(),
-        },
-        position,
+        }
+        .try_into()
+        .unwrap(),
+        position: position.try_into().unwrap(),
         width: 520.0,
         height: 120.0,
     }
@@ -34,7 +36,7 @@ fn card(id: &str, position: Point) -> CodeCard {
 
 fn edge(from: &str, to: &str) -> Connection {
     Connection {
-        id: format!("{from}:{to}"),
+        id: format!("{from}:{to}").into(),
         from: from.into(),
         to: to.into(),
         kind: ConnectionKind::Definition,
@@ -51,7 +53,15 @@ fn invalid_later_card_does_not_apply_earlier_reflow() {
     ];
     cards[2].width = f32::MAX;
     let before = cards.clone();
-    assert!(plan_restore_repair(&cards, LayoutRules::default()).is_err());
+    let input: crate::Result<Vec<_>> = cards
+        .iter()
+        .map(crate::layout::LayoutCard::try_from)
+        .collect();
+    assert!(
+        input
+            .and_then(|input| plan_restore_repair(&input, LayoutRules::default()))
+            .is_err()
+    );
     assert_eq!(cards, before);
 }
 
@@ -62,9 +72,19 @@ fn failed_tree_arrangement_does_not_apply_any_placements() {
         card("second", Point::new(800.0, 500.0)),
     ];
     cards[1].width = f32::MAX;
-    cards[1].position.x = f32::MAX;
+    cards[1].position = Point::new(f32::MAX, cards[1].position.y)
+        .try_into()
+        .unwrap();
     let before = cards.clone();
-    assert!(plan_tree_arrangement(&cards, &[], None, LayoutRules::default()).is_err());
+    let input: crate::Result<Vec<_>> = cards
+        .iter()
+        .map(crate::layout::LayoutCard::try_from)
+        .collect();
+    assert!(
+        input
+            .and_then(|input| plan_tree_arrangement(&input, &[], None, LayoutRules::default()))
+            .is_err()
+    );
     assert_eq!(cards, before);
 }
 
@@ -91,7 +111,9 @@ fn removal_closes_orphaned_cycle_but_preserves_clicked_source() {
 #[test]
 fn regions_assign_cards_to_the_deepest_package_root() {
     let mut nested = card("nested", Point::default());
-    nested.source.symbol.path = PathBuf::from("/project/nested/src/lib.rs");
+    let mut source = nested.source.to_document();
+    source.symbol.path = PathBuf::from("/project/nested/src/lib.rs");
+    nested.source = source.try_into().unwrap();
     let projects = vec![
         ProjectCrate {
             id: "outer".into(),
@@ -104,7 +126,11 @@ fn regions_assign_cards_to_the_deepest_package_root() {
             root: PathBuf::from("/project/nested"),
         },
     ];
-    let regions = build_regions(&[nested], &PathBuf::from("/project"), &projects);
+    let regions = build_regions(
+        &[crate::layout::LayoutCard::try_from(&nested).unwrap()],
+        &PathBuf::from("/project"),
+        &projects,
+    );
     let package = regions
         .iter()
         .find(|region| region.id == "crate:inner")

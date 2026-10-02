@@ -3,12 +3,12 @@ use super::*;
 fn source_hover_is_debounced_and_uses_absolute_utf16_at_each_zoom(cx: &mut TestAppContext) {
     let (explorer, requests) = fixture();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
@@ -22,8 +22,13 @@ fn source_hover_is_debounced_and_uses_absolute_utf16_at_each_zoom(cx: &mut TestA
     ] {
         view.update(cx, |view, cx| {
             view.clear_hover(cx);
-            view.session.viewport.zoom = zoom;
-            view.session.viewport.offset = offset;
+            view.command(
+                Command::SetViewport(refscape_model::Viewport {
+                    zoom,
+                    offset: offset.try_into().unwrap(),
+                }),
+                cx,
+            );
             cx.notify();
         });
         requests.lock().unwrap().clear();
@@ -128,14 +133,31 @@ fn source_hover_is_debounced_and_uses_absolute_utf16_at_each_zoom(cx: &mut TestA
 
 #[gpui::test]
 fn long_hover_documentation_scrolls_without_moving_the_canvas(cx: &mut TestAppContext) {
-    let (explorer, requests) = fixture();
+    let (explorer, requests) = source_fixture(
+        SourceDocument {
+            symbol: Symbol::file(
+                "sample.rs".into(),
+                SourceRange {
+                    start: Position::new(12, 5),
+                    end: Position::new(13, 9),
+                },
+            ),
+            code: "日本😀call\n日本😀other".into(),
+            tokens: vec![],
+            context: vec![],
+            folded: vec![],
+            expanded: vec![],
+            code_start: None,
+        },
+        vec![],
+    );
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
@@ -156,9 +178,7 @@ fn long_hover_documentation_scrolls_without_moving_the_canvas(cx: &mut TestAppCo
         .advance_clock(std::time::Duration::from_millis(400));
     cx.run_until_parked();
     view.update(cx, |view, cx| {
-        // A real pointer path can pass over a word on the next source row.
-        view.session.cards[0].source.code.push_str("\n日本😀other");
-        view.session.cards[0].source.symbol.range.end = Position::new(13, 9);
+        // A real pointer path can pass over the immutable fixture's next row.
         view.hover.text = Some(
             (0..80)
                 .map(|line| format!("Documentation line {line}"))
@@ -184,7 +204,7 @@ fn long_hover_documentation_scrolls_without_moving_the_canvas(cx: &mut TestAppCo
     cx.background_executor
         .advance_clock(std::time::Duration::from_millis(500));
     cx.run_until_parked();
-    let viewport = view.read_with(cx, |view, _| view.session.viewport);
+    let viewport = view.read_with(cx, |view, _| view.controller.snapshot().viewport);
     cx.simulate_event(ScrollWheelEvent {
         position: inside,
         delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
@@ -198,7 +218,7 @@ fn long_hover_documentation_scrolls_without_moving_the_canvas(cx: &mut TestAppCo
             view.hover.scroll.offset().y < px(0.0),
             "documentation actually scrolls"
         );
-        assert_eq!(view.session.viewport, viewport);
+        assert_eq!(view.controller.snapshot().viewport, viewport);
         assert_eq!(requests.lock().unwrap().len(), 1);
     });
     cx.simulate_keystrokes("escape");
@@ -210,14 +230,31 @@ fn long_hover_documentation_scrolls_without_moving_the_canvas(cx: &mut TestAppCo
 
 #[gpui::test]
 fn hover_cancels_when_zooming_and_never_requests_hidden_source(cx: &mut TestAppContext) {
-    let (explorer, requests) = fixture();
+    let (explorer, requests) = source_fixture(
+        SourceDocument {
+            symbol: Symbol::file(
+                "sample.rs".into(),
+                SourceRange {
+                    start: Position::new(12, 5),
+                    end: Position::new(13, 9),
+                },
+            ),
+            code: "日本😀call\n日本😀other".into(),
+            tokens: vec![],
+            context: vec![],
+            folded: vec![],
+            expanded: vec![],
+            code_start: None,
+        },
+        vec![],
+    );
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             "session.json".into(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )

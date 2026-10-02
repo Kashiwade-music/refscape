@@ -1,85 +1,42 @@
-//! Source navigation and application commands.
-use super::*;
-
-impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<L, R> {
+//! Source navigation translates native input to application intent.
+use super::ExplorerView;
+use gpui::Context;
+use refscape_application::Command;
+use refscape_model::{Point, Symbol};
+use std::path::PathBuf;
+impl ExplorerView {
     pub(super) fn search(&mut self, cx: &mut Context<Self>) {
-        let query = self.search.query.clone();
-        self.run_job(
-            "Searching workspace symbols…",
-            Box::new(move |explorer| {
-                Ok(Output {
-                    symbols: Some(explorer.search(&query)?),
-                    ..Default::default()
-                })
-            }),
-            cx,
-        );
+        self.command(Command::Search(self.search.query.clone()), cx);
     }
-
     pub(super) fn insertion_point(&self) -> Point {
-        self.session
+        self.controller
+            .snapshot()
             .viewport
             .screen_to_world(Point::new(100.0, 80.0))
     }
     pub(super) fn add_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let position = self.insertion_point();
-        self.run_job(
-            "Opening source file…",
-            Box::new(move |explorer| {
-                Ok(Output {
-                    prepared: Some(explorer.prepare_add_file(&path, position)?),
-                    symbols: Some(explorer.symbols(&path)?),
-                    ..Default::default()
-                })
-            }),
+        self.command(
+            Command::AddFile {
+                path,
+                position: self.insertion_point(),
+            },
             cx,
         );
     }
     pub(super) fn toggle_symbol(&mut self, symbol: Symbol, cx: &mut Context<Self>) {
-        if let Some(id) = self
-            .session
-            .cards
-            .iter()
-            .find(|card| {
-                card.source.symbol.path == symbol.path
-                    && (card.source.symbol.id == symbol.id
-                        || (card.source.symbol.kind == symbol.kind
-                            && card.source.symbol.range == symbol.range))
-            })
-            .map(|card| card.id.clone())
-        {
-            self.layout_activity(cx);
-            self.canvas.selected = Some(id);
-            cx.notify();
-            self.remove_selected(cx);
-            return;
-        }
-        let position = self.insertion_point();
-        self.run_job(
-            "Toggling symbol…",
-            Box::new(move |explorer| {
-                Ok(Output {
-                    prepared: Some(explorer.prepare_add_symbol(symbol, position)?),
-                    ..Default::default()
-                })
-            }),
+        self.command(
+            Command::AddSymbol {
+                symbol,
+                position: self.insertion_point(),
+                toggle: true,
+            },
             cx,
         );
     }
     pub(super) fn remove_selected(&mut self, cx: &mut Context<Self>) {
-        if self.requests.busy || self.requests.closing {
-            return;
-        }
-        if let Some(id) = self.canvas.selected.take() {
+        if let Some(id) = self.canvas.selected.clone() {
             self.clear_inspection();
-            self.run_job(
-                "Removing card…",
-                Box::new(move |explorer| {
-                    explorer.remove_card(&id)?;
-                    Ok(Output::default())
-                }),
-                cx,
-            );
+            self.command(Command::CloseCard { id }, cx);
         }
     }
     pub(super) fn cycle_theme(&mut self, cx: &mut Context<Self>) {
@@ -87,16 +44,9 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             .project
             .themes
             .iter()
-            .position(|t| *t == self.session.theme)
+            .position(|t| *t == self.controller.snapshot().theme)
             .unwrap_or(0);
         let theme = self.project.themes[(index + 1) % self.project.themes.len()].clone();
-        self.run_job(
-            "Applying theme…",
-            Box::new(move |explorer| {
-                explorer.set_theme(theme)?;
-                Ok(Output::default())
-            }),
-            cx,
-        );
+        self.command(Command::SetTheme(theme), cx);
     }
 }

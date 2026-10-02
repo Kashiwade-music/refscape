@@ -1,27 +1,27 @@
 //! Source-file and project grouping derived from the visible cards.
 
-use refscape_model::{CodeCard, ProjectCrate, Region};
+use refscape_model::{CardId, ProjectCrate, Region, RegionKind};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
 pub fn build_regions(
-    cards: &[CodeCard],
+    cards: &[crate::layout::LayoutCard],
     project_root: &Path,
     project_crates: &[ProjectCrate],
 ) -> Vec<Region> {
-    let mut modules: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
-    let mut crates: BTreeMap<String, (String, PathBuf, Vec<String>)> = BTreeMap::new();
+    let mut modules: BTreeMap<PathBuf, Vec<CardId>> = BTreeMap::new();
+    let mut crates: BTreeMap<String, (String, PathBuf, Vec<CardId>)> = BTreeMap::new();
     let mut unmatched = Vec::new();
     for card in cards {
         modules
-            .entry(card.source.symbol.path.clone())
+            .entry(card.order.path.clone())
             .or_default()
             .push(card.id.clone());
         match project_crates
             .iter()
-            .filter(|project| card.source.symbol.path.starts_with(&project.root))
+            .filter(|project| card.order.path.starts_with(&project.root))
             .max_by_key(|project| project.root.components().count())
         {
             Some(project) => crates
@@ -35,6 +35,7 @@ pub fn build_regions(
     let mut regions: Vec<Region> = modules
         .into_iter()
         .map(|(path, card_ids)| Region {
+            kind: RegionKind::Module,
             id: format!("module:{}", path.to_string_lossy()),
             label: path
                 .strip_prefix(project_root)
@@ -49,6 +50,7 @@ pub fn build_regions(
         regions.insert(
             0,
             Region {
+                kind: RegionKind::Crate,
                 id: format!("crate:{id}"),
                 label,
                 path,
@@ -60,6 +62,7 @@ pub fn build_regions(
         regions.insert(
             0,
             Region {
+                kind: RegionKind::Project,
                 id: format!("project:{}", project_root.to_string_lossy()),
                 label: project_root
                     .file_name()

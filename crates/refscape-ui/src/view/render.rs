@@ -1,7 +1,16 @@
 //! Native controls and view composition.
-use super::*;
+use super::{
+    ExplorerView,
+    interaction::Drag,
+    painting::{self, paint_canvas},
+};
+use gpui::{
+    Bounds, Context, ElementInputHandler, MouseButton, MouseDownEvent, Render, TextAlign, TextRun,
+    Window, canvas, div, fill, point, prelude::*, px, quad, rgb, size,
+};
+use refscape_model::{ProjectLanguage, ProjectOpenOptions};
 
-impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<L, R> {
+impl ExplorerView {
     pub(super) fn button(
         &self,
         label: &str,
@@ -14,7 +23,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
             .py_2()
             .rounded_md()
             .cursor_pointer()
-            .bg(color(&self.session.theme.palette.surface_alt))
+            .bg(color(&self.controller.snapshot().theme.palette.surface_alt))
             .text_size(px(12.0))
             .hover(|style| style.opacity(0.75))
             .child(label.to_string())
@@ -26,27 +35,24 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> ExplorerView<
     }
 }
 
-impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for ExplorerView<L, R> {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = self.session.theme.palette.clone();
+impl Render for ExplorerView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.close_ready {
+            window.remove_window();
+        }
+        let palette = self.controller.snapshot().theme.palette.clone();
         let entity = cx.entity();
         let query_entity = entity.clone();
         let query = self.search.query.clone();
         let selection = self.search.selection.clone();
         let focused = self.search.focused;
         let query_palette = palette.clone();
-        let session = self.session.clone();
+        let session = self.controller.shared_snapshot();
+        let scene = self.scene.clone();
         let selected = self.canvas.selected.clone();
         let preview = self.canvas.drag_preview.clone();
         let root = session.project_root.clone();
-        let lower = query.to_lowercase();
-        let files: Vec<_> = self
-            .project
-            .files
-            .iter()
-            .filter(|p| lower.is_empty() || p.to_string_lossy().to_lowercase().contains(&lower))
-            .cloned()
-            .collect();
+        let files = self.sidebar.filter(&query);
         let symbols = self.project.symbols.clone();
         let toolbar = div()
             .min_h(px(60.0))
@@ -93,7 +99,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                             .then(|| self.button("Undo layout", cx, |v, cx| v.undo_layout(cx))),
                     )
                     .child(self.button(
-                        &format!("Theme: {}", self.session.theme.name),
+                        &format!("Theme: {}", self.controller.snapshot().theme.name),
                         cx,
                         |v, cx| v.cycle_theme(cx),
                     )),
@@ -129,7 +135,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                         .on_click(cx.listener(move |v, _, _, cx| v.toggle_symbol(source.clone(), cx)))
                 }))
                 .child(div().py_2().text_size(px(11.0)).text_color(color(&palette.muted)).child(format!("FILES · {}", files.len())))
-                .children(files.into_iter().take(1000).enumerate().map(|(index, path)| {
+                .children(files.iter().take(1000).cloned().enumerate().map(|(index, path)| {
                     let title = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
                     div().id(("file", index)).p_2().text_size(px(11.0)).rounded_md().cursor_pointer().hover(|style| style.bg(color(&palette.surface_alt))).child(title).on_click(cx.listener(move |v, _, _, cx| v.add_file(path.clone(), cx)))
                 })))
@@ -162,7 +168,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                         return;
                     }
                     v.clear_hover(cx);
-                    v.canvas.drag = Some(Drag::Pan(e.position));
+                    v.canvas.drag = Some(Drag::Pan(MouseButton::Middle, e.position));
                     v.layout_activity(cx);
                     cx.notify();
                 }),
@@ -179,20 +185,24 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|v, _, _, cx| {
-                    v.finish_drag(cx);
+                    v.release(MouseButton::Left, cx);
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|v, _, _, cx| {
-                    v.finish_drag(cx);
+                    v.release(MouseButton::Left, cx);
                 }),
             )
             .on_mouse_up(
                 MouseButton::Middle,
                 cx.listener(|v, _, _, cx| {
-                    v.finish_drag(cx);
+                    v.release(MouseButton::Middle, cx);
                 }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Middle,
+                cx.listener(|v, _, _, cx| v.release(MouseButton::Middle, cx)),
             )
             .on_scroll_wheel(cx.listener(|v, e, _, cx| v.scroll(e, cx)))
             .child(
@@ -203,6 +213,7 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                             &session,
                             (selected.as_deref(), context_hover.as_ref()),
                             inspection.as_ref(),
+                            &mut scene.borrow_mut(),
                             bounds,
                             window,
                             cx,
@@ -210,10 +221,9 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                         if let Some((id, position)) = &preview
                             && let Some(card) = session.cards.iter().find(|card| &card.id == id)
                         {
-                            let mut preview_card = card.clone();
-                            preview_card.position = *position;
+                            let rect = painting::bounds_at(card, *position, &session, bounds);
                             window.paint_quad(quad(
-                                card_bounds(&preview_card, &session, bounds),
+                                rect,
                                 px(7.0 * session.viewport.zoom),
                                 color(&session.theme.palette.accent).opacity(0.08),
                                 px(2.0),
@@ -278,19 +288,15 @@ impl<L: LanguageService + 'static, R: SessionRepository + 'static> Render for Ex
                             .text_color(color(&palette.muted))
                             .child(format!(
                                 "{}% · {} · {}",
-                                (self.session.viewport.zoom * 100.0).round(),
-                                if self.session.viewport.zoom < 0.35 {
-                                    if self.session.project_options.language == ProjectLanguage::Cpp
-                                    {
-                                        "PROJECT"
-                                    } else {
-                                        "CRATES"
-                                    }
-                                } else if self.session.viewport.zoom < 0.65 {
-                                    "MODULES"
-                                } else {
-                                    "CODE"
-                                },
+                                (self.controller.snapshot().viewport.zoom * 100.0).round(),
+                                super::scene::BackendPresentation::for_language(
+                                    self.controller.snapshot().project_options.language
+                                )
+                                .detail_label(
+                                    super::scene::DetailLevel::from_zoom(
+                                        self.controller.snapshot().viewport.zoom
+                                    )
+                                ),
                                 display_path(&self.project.session_path)
                             )),
                     ),
@@ -302,7 +308,7 @@ pub(super) fn color(value: &str) -> gpui::Hsla {
     rgb(u32::from_str_radix(value.trim_start_matches('#'), 16).unwrap_or(0x808080)).into()
 }
 
-pub(super) fn project_settings_label(options: &ProjectOptions) -> String {
+pub(super) fn project_settings_label(options: &ProjectOpenOptions) -> String {
     match options.language {
         ProjectLanguage::Auto => "Language: automatic".into(),
         ProjectLanguage::Rust => "Rust · rust-analyzer".into(),

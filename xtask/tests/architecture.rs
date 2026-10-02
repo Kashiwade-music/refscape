@@ -8,9 +8,11 @@ use xtask::{check_architecture, dependency_graph, write_dependency_graph};
 
 const NAMES: &[&str] = &[
     "refscape-model",
+    "refscape-analysis",
     "refscape-canvas",
     "refscape-application",
     "refscape-lsp",
+    "refscape-language-support",
     "refscape-language-rust",
     "refscape-language-cpp",
     "refscape-language-typescript",
@@ -22,53 +24,77 @@ const NAMES: &[&str] = &[
 ];
 const EDGES: &[(&str, &[&str])] = &[
     ("refscape-model", &[]),
+    ("refscape-analysis", &["refscape-model"]),
     ("refscape-canvas", &["refscape-model"]),
     (
         "refscape-application",
-        &["refscape-canvas", "refscape-model"],
+        &["refscape-model", "refscape-analysis", "refscape-canvas"],
     ),
-    ("refscape-lsp", &["refscape-model"]),
+    ("refscape-lsp", &["refscape-model", "refscape-analysis"]),
+    (
+        "refscape-language-support",
+        &["refscape-model", "refscape-analysis", "refscape-lsp"],
+    ),
     (
         "refscape-language-rust",
-        &["refscape-application", "refscape-lsp", "refscape-model"],
+        &[
+            "refscape-model",
+            "refscape-analysis",
+            "refscape-lsp",
+            "refscape-language-support",
+        ],
     ),
     (
         "refscape-language-cpp",
-        &["refscape-application", "refscape-lsp", "refscape-model"],
+        &[
+            "refscape-model",
+            "refscape-analysis",
+            "refscape-lsp",
+            "refscape-language-support",
+        ],
     ),
     (
         "refscape-language-typescript",
-        &["refscape-application", "refscape-lsp", "refscape-model"],
+        &[
+            "refscape-model",
+            "refscape-analysis",
+            "refscape-lsp",
+            "refscape-language-support",
+        ],
     ),
     (
         "refscape-language-python",
-        &["refscape-application", "refscape-lsp", "refscape-model"],
+        &[
+            "refscape-model",
+            "refscape-analysis",
+            "refscape-lsp",
+            "refscape-language-support",
+        ],
     ),
     (
         "refscape-language",
         &[
-            "refscape-application",
+            "refscape-model",
+            "refscape-analysis",
+            "refscape-language-support",
             "refscape-language-rust",
             "refscape-language-cpp",
             "refscape-language-typescript",
             "refscape-language-python",
-            "refscape-model",
         ],
     ),
     (
         "refscape-storage",
-        &["refscape-application", "refscape-model"],
+        &["refscape-model", "refscape-application"],
     ),
-    (
-        "refscape-ui",
-        &["refscape-application", "refscape-canvas", "refscape-model"],
-    ),
+    ("refscape-ui", &["refscape-model", "refscape-application"]),
     (
         "refscape-app",
         &[
+            "refscape-model",
+            "refscape-analysis",
             "refscape-application",
             "refscape-language",
-            "refscape-model",
             "refscape-storage",
             "refscape-ui",
         ],
@@ -151,7 +177,7 @@ impl Drop for Fixture {
 fn valid_workspace_passes_without_fetching_the_reserved_gpui_dependency() {
     let fixture = Fixture::new();
     let report = check_architecture(&fixture.root).unwrap();
-    assert!(report.contains("12 product crates, 32 declared internal dependencies"));
+    assert!(report.contains("14 product crates, 43 declared internal dependencies"));
     assert!(report.contains("xtask isolated"));
     assert!(!fixture.root.join("Cargo.lock").exists());
 }
@@ -173,7 +199,7 @@ fn graph_contains_actual_edges_and_the_isolated_xtask() {
     assert!(graph.contains("refscape_model[\"refscape-model\"]"));
     assert!(graph.contains("refscape_ui -->|\"normal\"| refscape_application"));
     assert!(!graph.contains("refscape_ui -->|\"normal\"| refscape_model"));
-    assert_eq!(graph.matches(" -->|").count(), 31);
+    assert_eq!(graph.matches(" -->|").count(), 42);
     assert!(graph.contains("xtask[\"xtask\"]"));
     assert!(!graph.contains("xtask -->"));
     assert!(!graph.contains("gpui"));

@@ -1,24 +1,22 @@
 //! Native platform and window lifecycle; callers never need GPUI types.
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
+use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
-use refscape_application::{
-    explorer::Explorer,
-    ports::{LanguageService, SessionRepository},
-};
+use refscape_application::{ApplicationController, Command, EffectExecutor};
 #[cfg(feature = "visual-tests")]
 use refscape_model::Position;
-use refscape_model::{ProjectOptions, Theme};
+use refscape_model::{ProjectOpenOptions, Theme};
 
-use crate::view::ExplorerView;
+use crate::view::{ExplorerView, ViewLaunch};
 
 /// Open the explorer with language and compilation database overrides.
-pub fn run<L: LanguageService + 'static, R: SessionRepository + 'static>(
-    explorer: Explorer<L, R>,
+pub fn run(
+    controller: ApplicationController,
+    executor: Arc<dyn EffectExecutor>,
     session_path: PathBuf,
     themes: Vec<Theme>,
-    project: Option<PathBuf>,
-    project_options: ProjectOptions,
+    initial: Option<Command>,
+    project_options: ProjectOpenOptions,
 ) -> Result<(), String> {
     let launch_error = Rc::new(RefCell::new(None));
     let window_error = launch_error.clone();
@@ -40,11 +38,14 @@ pub fn run<L: LanguageService + 'static, R: SessionRepository + 'static>(
                 window.set_window_title("Refscape");
                 cx.new(|cx| {
                     ExplorerView::new(
-                        explorer,
-                        session_path,
-                        themes,
-                        project,
-                        project_options,
+                        controller,
+                        executor,
+                        ViewLaunch {
+                            session_path,
+                            themes,
+                            initial,
+                            options: project_options,
+                        },
                         window,
                         cx,
                     )
@@ -64,17 +65,35 @@ pub fn run<L: LanguageService + 'static, R: SessionRepository + 'static>(
 
 /// Render a selected variable as well as its expanded type cards.
 #[cfg(feature = "visual-tests")]
-pub fn render_snapshot<L: LanguageService + 'static, R: SessionRepository + 'static>(
-    mut explorer: Explorer<L, R>,
+pub fn render_snapshot(
+    mut controller: ApplicationController,
+    executor: Arc<dyn EffectExecutor>,
     session_path: PathBuf,
     output: PathBuf,
     selection: Option<(String, Position)>,
 ) -> Result<(), String> {
-    let inspection = match &selection {
-        Some((id, position)) => explorer.inspect_variable(id, *position)?,
-        None => None,
-    };
-    let result = Rc::new(RefCell::new(Ok(())));
+    let mut inspection = None;
+    if let Some((id, position)) = &selection {
+        let mut pending = std::collections::VecDeque::from([controller.dispatch(
+            refscape_application::Command::Inspect {
+                card: id.clone(),
+                position: *position,
+            },
+        )]);
+        while let Some(transition) = pending.pop_front() {
+            for event in transition.events {
+                if let refscape_application::ViewEvent::Inspection(value) = event {
+                    inspection = Some(value);
+                }
+            }
+            for effect in transition.effects {
+                pending.push_back(controller.complete(executor.execute(effect)));
+            }
+        }
+    }
+    let result = Rc::new(RefCell::new(Err(
+        "Native frame readiness timed out".to_string()
+    )));
     let window_result = result.clone();
     gpui_platform::application().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
@@ -88,11 +107,9 @@ pub fn render_snapshot<L: LanguageService + 'static, R: SessionRepository + 'sta
             |window, cx| {
                 cx.new(|cx| {
                     let mut view = ExplorerView::new(
-                        explorer,
-                        session_path,
-                        vec![],
-                        None,
-                        ProjectOptions::default(),
+                        controller,
+                        executor,
+                        ViewLaunch { session_path, themes:vec![], initial:None, options:ProjectOpenOptions::default() },
                         window,
                         cx,
                     );
@@ -117,31 +134,50 @@ pub fn render_snapshot<L: LanguageService + 'static, R: SessionRepository + 'sta
             return;
         }
         cx.spawn(async move |cx| {
-            // Let the native resize event initialize the DirectX render target.
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(800))
-                .await;
-            let rendered = cx.update_window(handle.into(), |_, window, cx| {
-                let arena = window.draw(cx);
-                let saved = (|| {
-                    let image = window
-                        .render_to_image()
-                        .map_err(|error| error.to_string())?;
-                    if image.width() < 1000 || image.height() < 600 {
-                        return Err("native window has not resized".into());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut readiness_attempt=0_u32;
+            loop {
+                readiness_attempt+=1;
+                let attempt = cx.update_window(handle.into(), |root, window, cx| {
+                    if root.clone().downcast::<ExplorerView>().ok().is_some_and(|view| !view.read(cx).capture_ready()) {return CaptureAttempt::Unready("application effect pending".into());}
+                    let arena = window.draw(cx);
+                    let captured = window.render_to_image();
+                    arena.clear(cx);
+                    match captured {
+                        Ok(image) if image.width() >= 1000 && image.height() >= 600 => {
+                            println!("Native frame: {}x{}, scale_factor={}, readiness_attempt={}; fonts=Cascadia Code,Segoe UI,Consolas",image.width(),image.height(),window.scale_factor(),readiness_attempt);
+                            CaptureAttempt::Finished(image.save(&output).map_err(|error|error.to_string()))
+                        }
+                        Ok(image) => CaptureAttempt::Unready(format!("native target is {}×{}",image.width(),image.height())),
+                        Err(error) => {
+                            let message=error.to_string();
+                            if matches!(message.as_str(),"devices missing"|"resources missing"|"render target missing"|"render_to_image unavailable while recovering from a lost device") {
+                                CaptureAttempt::Unready(message)
+                            } else { CaptureAttempt::Finished(Err(message)) }
+                        }
                     }
-                    image.save(&output).map_err(|error| error.to_string())?;
-                    println!("Saved {}", output.display());
-                    Ok(())
-                })();
-                arena.clear(cx);
-                saved
-            });
-            *window_result.borrow_mut() =
-                rendered.map_err(|error| error.to_string()).and_then(|r| r);
-            cx.update(|cx| cx.quit());
-        })
-        .detach();
+                });
+                match attempt {
+                    Ok(CaptureAttempt::Finished(result)) => { *window_result.borrow_mut()=result; break; }
+                    Err(error) => { *window_result.borrow_mut()=Err(error.to_string()); break; }
+                    Ok(CaptureAttempt::Unready(message)) if std::time::Instant::now()>=deadline => {
+                        *window_result.borrow_mut()=Err(format!("Native frame readiness timed out: {message}")); break;
+                    }
+                    Ok(CaptureAttempt::Unready(_)) => {
+                        // Retry readiness after native events can run. This is a
+                        // bounded target check, not a fixed capture delay.
+                        cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                    }
+                }
+            }
+            cx.update(|cx|cx.quit());
+        }).detach();
     });
     result.borrow().clone()
+}
+
+#[cfg(feature = "visual-tests")]
+enum CaptureAttempt {
+    Finished(Result<(), String>),
+    Unready(String),
 }

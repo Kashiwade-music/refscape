@@ -1,88 +1,150 @@
-//! C/C++ project discovery and clangd policy.
+//! C/C++ metadata and clangd policy.
 mod project;
-use refscape_application::ports::LanguageService;
-use refscape_lsp::transport::DefaultServerBehavior;
-use refscape_lsp::{LspSession, ServerConfiguration};
-use refscape_model::{
-    Position, ProjectCrate, ProjectLanguage, ProjectOptions, SourceDocument, SourceRange, Symbol,
-};
-use serde_json::json;
-use std::{
-    env,
-    path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
-};
-
-pub struct Clangd {
-    executable: PathBuf,
-    timeout: Duration,
-    active: Option<ActiveProject>,
+pub use project::{CompilationConfig, POLICY as FILE_POLICY};
+pub fn probe_markers(root: &Path) -> Result<bool, String> {
+    project::probe_markers(root)
 }
-struct ActiveProject {
-    root: PathBuf,
-    session: LspSession,
-    project: project::CppProject,
+use refscape_analysis::{
+    AnalysisFactory, AnalysisResult, ErrorKind, OperationContext, PreparedProject, RefscapeError,
+};
+use refscape_language_support::resolver::{ConfiguredExecutable, ServerKind, resolve};
+use refscape_language_support::{
+    EnvironmentSnapshot, LspAnalysisSession, Metadata, MetadataProvider, SearchMergePolicy,
+};
+use refscape_lsp::{ServerConfiguration, transport::DefaultServerBehavior};
+use refscape_model::{ProjectLanguage, ProjectOpenOptions};
+use serde_json::json;
+use std::path::{Path, PathBuf};
+#[derive(Clone)]
+pub struct Clangd {
+    executable: ConfiguredExecutable,
+    environment: EnvironmentSnapshot,
 }
 pub fn supports(root: &Path) -> Result<bool, String> {
     project::supports(root)
 }
 impl Default for Clangd {
     fn default() -> Self {
-        Self::new(
-            env::var_os("REFSCAPE_CLANGD")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| "clangd".into()),
+        let environment = EnvironmentSnapshot::capture();
+        Self::from_environment(
+            environment.configured_executable("REFSCAPE_CLANGD", "clangd"),
+            environment,
         )
     }
 }
 impl Clangd {
     pub fn new(executable: impl Into<PathBuf>) -> Self {
+        Self::from_environment(
+            ConfiguredExecutable::explicit(executable),
+            EnvironmentSnapshot::capture(),
+        )
+    }
+    pub fn from_environment(
+        executable: impl Into<ConfiguredExecutable>,
+        environment: EnvironmentSnapshot,
+    ) -> Self {
         Self {
             executable: executable.into(),
-            timeout: Duration::from_secs(120),
-            active: None,
+            environment,
         }
-    }
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
-        self
-    }
-    fn session(&mut self) -> Result<&mut LspSession, String> {
-        self.active
-            .as_mut()
-            .map(|active| &mut active.session)
-            .ok_or_else(|| "open a project before requesting analysis".into())
     }
 }
-impl LanguageService for Clangd {
-    fn open_project(&mut self, root: &Path, options: &ProjectOptions) -> Result<(), String> {
-        if options.language == ProjectLanguage::Auto
-            && options.compilation_database.is_none()
-            && !supports(root)?
-        {
-            return Err(format!(
-                "{} does not contain a C/C++ project",
-                root.display()
-            ));
+struct Provider {
+    root: PathBuf,
+    options: ProjectOpenOptions,
+    fingerprint: u64,
+    revision: u64,
+    initial_project: Option<project::CppProject>,
+}
+impl MetadataProvider for Provider {
+    fn refresh(&mut self, context: &OperationContext) -> AnalysisResult<Metadata> {
+        context.check()?;
+        let project = match self.initial_project.take() {
+            Some(project) => project,
+            None => project::CppProject::discover_with_context(&self.root, &self.options, context)?,
+        };
+        let fingerprint = project.metadata_fingerprint;
+        if fingerprint != self.fingerprint {
+            self.fingerprint = fingerprint;
+            self.revision = self.revision.checked_add(1).ok_or_else(|| {
+                RefscapeError::new(
+                    ErrorKind::InternalInvariant,
+                    "C/C++ metadata revision overflow",
+                )
+            })?;
         }
+        let (files, catalog_error) = match project.files_with_context(&self.root, context) {
+            Ok(files) => (files, None),
+            Err(error) => (vec![], Some(error)),
+        };
+        context.check()?;
+        Ok(Metadata {
+            options: project.options().try_into()?,
+            seed: project.index_seed_from_files(&files),
+            files,
+            catalog_error,
+            crates: vec![],
+            search: if matches!(
+                project.configuration,
+                project::CompilationConfig::DelegateToClangd | project::CompilationConfig::Fallback
+            ) {
+                SearchMergePolicy::WorkspaceFirst
+            } else {
+                SearchMergePolicy::WorkspaceOnly
+            },
+            prewarm_references: false,
+            revision: self.revision,
+        })
+    }
+}
+impl AnalysisFactory for Clangd {
+    fn prepare(
+        &self,
+        root: &Path,
+        options: &ProjectOpenOptions,
+        context: &OperationContext,
+    ) -> AnalysisResult<PreparedProject> {
+        context.check()?;
         if !matches!(
             options.language,
             ProjectLanguage::Auto | ProjectLanguage::Cpp
         ) {
-            return Err("clangd analyzes C/C++ projects; choose the C/C++ language".into());
+            return Err(RefscapeError::new(
+                ErrorKind::InvalidData,
+                "clangd analyzes C/C++ projects; choose the C/C++ language",
+            ));
         }
-        let root = root
-            .canonicalize()
-            .map_err(|e| format!("cannot open {}: {e}", root.display()))?;
+        if options.language == ProjectLanguage::Auto
+            && options.compilation_database.is_none()
+            && !supports(root)?
+        {
+            return Err(RefscapeError::new(
+                ErrorKind::InvalidData,
+                format!("{} does not contain a C/C++ project", root.display()),
+            ));
+        }
+        let root = root.canonicalize().map_err(|e| {
+            RefscapeError::new(
+                ErrorKind::Io,
+                format!("cannot open {}: {e}", root.display()),
+            )
+        })?;
         if !root.is_dir() {
-            return Err(format!("{} is not a source folder", root.display()));
+            return Err(RefscapeError::new(
+                ErrorKind::InvalidData,
+                format!("{} is not a source folder", root.display()),
+            ));
         }
-        let project = project::CppProject::discover(&root, options)?;
-        let mut command = Command::new(&self.executable);
-        command
-            .current_dir(&root)
-            .args(["--background-index", "--enable-config"]);
+        let project = project::CppProject::discover_with_context(&root, options, context)?;
+        let mut launch = resolve(
+            &root,
+            &self.executable,
+            ServerKind::Native,
+            &self.environment,
+        )?;
+        launch
+            .args
+            .extend(["--background-index".into(), "--enable-config".into()]);
         if let Some(database) = &project.database {
             let mut flag = std::ffi::OsString::from("--compile-commands-dir=");
             flag.push(
@@ -90,12 +152,11 @@ impl LanguageService for Clangd {
                     .parent()
                     .ok_or("compilation database has no directory")?,
             );
-            command.arg(flag);
+            launch.args.push(flag);
         }
-        let mut session = LspSession::start(
+        LspAnalysisSession::prepare(
             root.clone(),
-            &mut command,
-            self.timeout,
+            launch.command(),
             ServerConfiguration {
                 name: "clangd".into(),
                 installation_hint: "Install clangd (LLVM) or set REFSCAPE_CLANGD to its executable"
@@ -105,87 +166,14 @@ impl LanguageService for Clangd {
                 language_id: project::language_id,
                 behavior: Box::new(DefaultServerBehavior),
             },
-        )?;
-        // clangd loads compile commands lazily. Await one TU's AST before publishing the session.
-        if let Some(seed) = project.index_seed(&root)? {
-            session.symbols(&seed)?;
-        }
-        self.active = Some(ActiveProject {
-            root,
-            session,
-            project,
-        });
-        Ok(())
-    }
-    fn project_options(&self) -> ProjectOptions {
-        self.active
-            .as_ref()
-            .map(|active| active.project.options())
-            .unwrap_or_default()
-    }
-    fn files(&mut self) -> Result<Vec<PathBuf>, String> {
-        let active = self.active.as_ref().ok_or("no project open")?;
-        active.project.files(&active.root)
-    }
-    fn project_crates(&mut self) -> Result<Vec<ProjectCrate>, String> {
-        Ok(vec![])
-    }
-    fn search(&mut self, query: &str) -> Result<Vec<Symbol>, String> {
-        let mut symbols = self.session()?.search(query)?;
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|active| active.project.database.is_none())
-        {
-            // Fallback commands lack background indexing; supplement with document symbols.
-            fn matches(symbols: &[Symbol], query: &str, output: &mut Vec<Symbol>) {
-                for symbol in symbols {
-                    if symbol.name.to_lowercase().contains(query) {
-                        output.push(symbol.clone());
-                    }
-                    matches(&symbol.children, query, output);
-                }
-            }
-            let query = query.to_lowercase();
-            for file in self.files()? {
-                matches(&self.symbols(&file)?, &query, &mut symbols);
-            }
-            symbols.sort_by(|left, right| {
-                (&left.path, left.range.start, left.range.end, &left.name).cmp(&(
-                    &right.path,
-                    right.range.start,
-                    right.range.end,
-                    &right.name,
-                ))
-            });
-            let mut seen = std::collections::BTreeSet::new();
-            symbols.retain(|symbol| seen.insert(symbol.id.clone()));
-        }
-        Ok(symbols)
-    }
-    fn symbols(&mut self, path: &Path) -> Result<Vec<Symbol>, String> {
-        self.session()?.symbols(path)
-    }
-    fn source(&mut self, symbol: &Symbol) -> Result<SourceDocument, String> {
-        self.session()?.source(symbol)
-    }
-    fn definitions(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>, String> {
-        self.session()?.definitions(path, position)
-    }
-    fn references(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>, String> {
-        self.session()?.references(path, position)
-    }
-    fn type_definitions(&mut self, path: &Path, position: Position) -> Result<Vec<Symbol>, String> {
-        self.session()?.type_definitions(path, position)
-    }
-    fn document_highlights(
-        &mut self,
-        path: &Path,
-        position: Position,
-    ) -> Result<Vec<SourceRange>, String> {
-        self.session()?.document_highlights(path, position)
-    }
-    fn hover(&mut self, path: &Path, position: Position) -> Result<Option<String>, String> {
-        self.session()?.hover(path, position)
+            Box::new(Provider {
+                root,
+                options: options.clone(),
+                fingerprint: 0,
+                revision: 0,
+                initial_project: Some(project),
+            }),
+            context,
+        )
     }
 }

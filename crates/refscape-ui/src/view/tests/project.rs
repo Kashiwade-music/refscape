@@ -1,35 +1,41 @@
 use super::*;
+use refscape_application::test_support::*;
+use refscape_model::{OperationContext, ProjectCrate, ResolvedProjectOptions};
 
 #[test]
 fn python_project_settings_display_the_backend() {
     assert_eq!(
-        project_settings_label(&ProjectOptions {
+        project_settings_label(&ProjectOpenOptions {
             language: ProjectLanguage::Python,
             compilation_database: None,
         }),
         "Python · basedpyright"
     );
 }
-type ProjectRequests = Arc<Mutex<Vec<(PathBuf, ProjectOptions)>>>;
+type ProjectRequests = Arc<Mutex<Vec<(PathBuf, ProjectOpenOptions)>>>;
 
+#[derive(Clone)]
 struct ProjectLanguageFixture {
     requests: ProjectRequests,
-    options: ProjectOptions,
+    options: ProjectOpenOptions,
     require_database: bool,
     files_error: bool,
     rejected_database: Option<PathBuf>,
 }
 
-impl LanguageService for ProjectLanguageFixture {
-    fn open_project(&mut self, root: &Path, options: &ProjectOptions) -> Result<(), String> {
-        self.requests
-            .lock()
-            .unwrap()
-            .push((root.into(), options.clone()));
-        if self.require_database
-            && options.compilation_database.is_none()
-            && self.requests.lock().unwrap().len() == 1
-        {
+impl AnalysisFactory for ProjectLanguageFixture {
+    fn prepare(
+        &self,
+        root: &Path,
+        options: &ProjectOpenOptions,
+        _: &OperationContext,
+    ) -> AnalysisResult<PreparedProject> {
+        let count = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push((root.into(), options.clone()));
+            requests.len()
+        };
+        if self.require_database && options.compilation_database.is_none() && count == 1 {
             return Err("Multiple compilation databases; select Build settings.".into());
         }
         if self.rejected_database.is_some()
@@ -37,40 +43,72 @@ impl LanguageService for ProjectLanguageFixture {
         {
             return Err("Saved compilation database is missing".into());
         }
-        self.options = options.clone();
-        Ok(())
+        let mut session = self.clone();
+        session.options = options.clone();
+        Ok(PreparedProject {
+            root: root.into(),
+            options: resolved_options(options),
+            crates: vec![],
+            capabilities: AnalysisCapabilities::default(),
+            catalog: if self.files_error && count > 1 {
+                CatalogOutcome::Failed("source enumeration failed".into())
+            } else {
+                CatalogOutcome::Ready(vec![])
+            },
+            session: Box::new(session),
+        })
     }
-    fn project_options(&self) -> ProjectOptions {
-        self.options.clone()
+}
+impl AnalysisSession for ProjectLanguageFixture {
+    fn project_options(&self) -> ResolvedProjectOptions {
+        resolved_options(&self.options)
     }
-    fn files(&mut self) -> Result<Vec<PathBuf>, String> {
+    fn files(&mut self, _: &OperationContext) -> AnalysisResult<Vec<PathBuf>> {
         if self.files_error {
             Err("source enumeration failed".into())
         } else {
             Ok(vec![])
         }
     }
-    fn symbols(&mut self, _: &Path) -> Result<Vec<Symbol>, String> {
+    fn symbols(&mut self, _: &Path, _: &OperationContext) -> AnalysisResult<Vec<Symbol>> {
         Ok(vec![])
     }
-    fn source(&mut self, _: &Symbol) -> Result<SourceDocument, String> {
+    fn source(&mut self, _: &Symbol, _: &OperationContext) -> AnalysisResult<SourceDocument> {
         Err("No sources".into())
     }
-    fn definitions(&mut self, _: &Path, _: Position) -> Result<Vec<Symbol>, String> {
+    fn definitions(
+        &mut self,
+        _: &Path,
+        _: Position,
+        _: &OperationContext,
+    ) -> AnalysisResult<Vec<NavigationTarget>> {
         Ok(vec![])
     }
-    fn references(&mut self, _: &Path, _: Position) -> Result<Vec<Symbol>, String> {
+    fn references(
+        &mut self,
+        _: &Path,
+        _: Position,
+        _: &OperationContext,
+    ) -> AnalysisResult<Vec<NavigationTarget>> {
+        Ok(vec![])
+    }
+    fn project_crates(&mut self, _: &OperationContext) -> AnalysisResult<Vec<ProjectCrate>> {
+        Ok(vec![])
+    }
+    fn search(&mut self, _: &str, _: &OperationContext) -> AnalysisResult<Vec<Symbol>> {
         Ok(vec![])
     }
 }
-
-struct ProjectRepositoryFixture(Option<Session>);
+struct ProjectRepositoryFixture(Option<ApplicationSnapshot>);
 impl SessionRepository for ProjectRepositoryFixture {
-    fn save(&self, _: &Path, _: &Session) -> Result<(), String> {
+    fn save(&self, _: &Path, _: &PersistableSession) -> refscape_application::Result<()> {
         Ok(())
     }
-    fn load(&self, _: &Path) -> Result<Session, String> {
-        self.0.clone().ok_or_else(|| "No saved session".into())
+    fn load(&self, _: &Path) -> refscape_application::Result<ImportedSession> {
+        self.0
+            .clone()
+            .map(|snapshot| ImportedSession { snapshot })
+            .ok_or_else(|| "No saved session".into())
     }
 }
 
@@ -112,10 +150,10 @@ fn compilation_database_retries_the_source_root_and_does_not_leak_to_next_projec
     let next_project = TemporaryProject::new();
     let database = project.0.join("build/compile_commands.json");
     let requests = Arc::new(Mutex::new(vec![]));
-    let explorer = Explorer::new(
+    let explorer = FixtureDriver::new(
         ProjectLanguageFixture {
             requests: requests.clone(),
-            options: ProjectOptions::default(),
+            options: ProjectOpenOptions::default(),
             require_database: true,
             files_error: false,
             rejected_database: None,
@@ -123,12 +161,12 @@ fn compilation_database_retries_the_source_root_and_does_not_leak_to_next_projec
         ProjectRepositoryFixture(None),
     );
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             PathBuf::new(),
             vec![],
             Some(project.0.clone()),
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
@@ -136,8 +174,17 @@ fn compilation_database_retries_the_source_root_and_does_not_leak_to_next_projec
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
         assert!(view.requests.error);
-        assert!(view.session.project_root.as_os_str().is_empty());
-        assert_eq!(view.project.pending.as_ref().unwrap().0, project.0);
+        assert!(
+            view.controller
+                .snapshot()
+                .project_root
+                .as_os_str()
+                .is_empty()
+        );
+        assert_eq!(
+            pending_project(view).unwrap().0,
+            project.0.canonicalize().unwrap()
+        );
     });
     view.update(cx, |view, cx| {
         view.select_compilation_database(database.clone(), cx)
@@ -145,17 +192,24 @@ fn compilation_database_retries_the_source_root_and_does_not_leak_to_next_projec
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
         assert!(!view.requests.error, "{}", view.requests.status);
-        assert_eq!(view.session.project_root, project.0.canonicalize().unwrap());
         assert_eq!(
-            view.session.project_options.compilation_database,
+            view.controller.snapshot().project_root,
+            project.0.canonicalize().unwrap()
+        );
+        assert_eq!(
+            view.controller
+                .snapshot()
+                .project_options
+                .compilation_database,
             Some(database.clone())
         );
-        assert!(view.project.pending.is_none());
+        assert!(view.controller.pending_project().is_none());
     });
     view.update(cx, |view, cx| {
-        view.open_project_with_session(
+        view.open_project_with_session_options(
             next_project.0.clone(),
             next_project.0.join("session.json"),
+            ProjectOpenOptions::default(),
             cx,
         );
     });
@@ -165,7 +219,7 @@ fn compilation_database_retries_the_source_root_and_does_not_leak_to_next_projec
     assert_eq!(requests[1].1.language, ProjectLanguage::Cpp);
     assert_eq!(requests[1].1.compilation_database, Some(database));
     assert_eq!(requests[2].0, next_project.0.canonicalize().unwrap());
-    assert_eq!(requests[2].1, ProjectOptions::default());
+    assert_eq!(requests[2].1, ProjectOpenOptions::default());
 }
 
 #[gpui::test]
@@ -177,15 +231,15 @@ fn opening_restores_saved_build_settings_before_starting_and_accepts_explicit_ov
     std::fs::write(&session_path, "fixture").unwrap();
     let saved_database = project.0.join("build/debug/compile_commands.json");
     let override_database = project.0.join("build/release/compile_commands.json");
-    let mut saved = Session::new(project.0.canonicalize().unwrap());
-    saved.project_options = ProjectOptions {
+    let mut saved = ApplicationSnapshot::new(project.0.canonicalize().unwrap());
+    saved.project_options = ProjectOpenOptions {
         language: ProjectLanguage::Cpp,
         compilation_database: Some(saved_database.clone()),
     };
     for (overrides, expected) in [
-        (ProjectOptions::default(), saved_database),
+        (ProjectOpenOptions::default(), saved_database),
         (
-            ProjectOptions {
+            ProjectOpenOptions {
                 language: ProjectLanguage::Cpp,
                 compilation_database: Some(override_database.clone()),
             },
@@ -193,10 +247,10 @@ fn opening_restores_saved_build_settings_before_starting_and_accepts_explicit_ov
         ),
     ] {
         let requests = Arc::new(Mutex::new(vec![]));
-        let explorer = Explorer::new(
+        let explorer = FixtureDriver::new(
             ProjectLanguageFixture {
                 requests: requests.clone(),
-                options: ProjectOptions::default(),
+                options: ProjectOpenOptions::default(),
                 require_database: true,
                 files_error: false,
                 rejected_database: None,
@@ -204,7 +258,7 @@ fn opening_restores_saved_build_settings_before_starting_and_accepts_explicit_ov
             ProjectRepositoryFixture(Some(saved.clone())),
         );
         let (view, test_cx) = cx.add_window_view(|window, cx| {
-            ExplorerView::new(
+            ExplorerView::from_fixture(
                 explorer,
                 session_path.clone(),
                 vec![],
@@ -225,7 +279,10 @@ fn opening_restores_saved_build_settings_before_starting_and_accepts_explicit_ov
         view.read_with(test_cx, |view, _| {
             assert!(!view.requests.error, "{}", view.requests.status);
             assert_eq!(
-                view.session.project_options.compilation_database,
+                view.controller
+                    .snapshot()
+                    .project_options
+                    .compilation_database,
                 Some(expected)
             );
         });
@@ -234,7 +291,7 @@ fn opening_restores_saved_build_settings_before_starting_and_accepts_explicit_ov
 
 #[test]
 fn cpp_fallback_warning_remains_visible_in_project_settings() {
-    let label = project_settings_label(&ProjectOptions {
+    let label = project_settings_label(&ProjectOpenOptions {
         language: ProjectLanguage::Cpp,
         compilation_database: None,
     });
@@ -243,19 +300,21 @@ fn cpp_fallback_warning_remains_visible_in_project_settings() {
 }
 
 struct RecordingProjectRepository {
-    saved: Session,
+    saved: ApplicationSnapshot,
     writes: Arc<Mutex<Vec<(PathBuf, PathBuf)>>>,
 }
 impl SessionRepository for RecordingProjectRepository {
-    fn save(&self, path: &Path, session: &Session) -> Result<(), String> {
+    fn save(&self, path: &Path, session: &PersistableSession) -> refscape_application::Result<()> {
         self.writes
             .lock()
             .unwrap()
-            .push((path.into(), session.project_root.clone()));
+            .push((path.into(), session.snapshot.project_root.clone()));
         Ok(())
     }
-    fn load(&self, _: &Path) -> Result<Session, String> {
-        Ok(self.saved.clone())
+    fn load(&self, _: &Path) -> refscape_application::Result<ImportedSession> {
+        Ok(ImportedSession {
+            snapshot: self.saved.clone(),
+        })
     }
 }
 
@@ -269,30 +328,34 @@ fn enumeration_failure_keeps_new_project_save_destination_for_project_and_sessio
     std::fs::write(&next_session, "fixture").unwrap();
     for open_saved_session in [false, true] {
         let writes = Arc::new(Mutex::new(vec![]));
-        let mut explorer = Explorer::new(
+        let mut explorer = FixtureDriver::new(
             ProjectLanguageFixture {
                 requests: Arc::new(Mutex::new(vec![])),
-                options: ProjectOptions::default(),
+                options: ProjectOpenOptions::default(),
                 require_database: false,
                 files_error: true,
                 rejected_database: None,
             },
             RecordingProjectRepository {
-                saved: Session::new(next.0.canonicalize().unwrap()),
+                saved: ApplicationSnapshot::new(next.0.canonicalize().unwrap()),
                 writes: writes.clone(),
             },
         );
-        explorer
-            .open_project(&previous.0, &ProjectOptions::default())
-            .unwrap();
         let old_session = previous.0.join("session.json");
+        explorer
+            .dispatch(Command::OpenProject {
+                root: previous.0.clone(),
+                options: ProjectOpenOptions::default(),
+                destination: old_session.clone(),
+            })
+            .unwrap();
         let (view, test_cx) = cx.add_window_view(|window, cx| {
-            ExplorerView::new(
+            ExplorerView::from_fixture(
                 explorer,
                 old_session.clone(),
                 vec![],
                 None,
-                ProjectOptions::default(),
+                ProjectOpenOptions::default(),
                 window,
                 cx,
             )
@@ -304,22 +367,33 @@ fn enumeration_failure_keeps_new_project_save_destination_for_project_and_sessio
             if open_saved_session {
                 view.open_session(next_session.clone(), cx);
             } else {
-                view.open_project_with_session(next.0.clone(), next_session.clone(), cx);
+                view.open_project_with_session_options(
+                    next.0.clone(),
+                    next_session.clone(),
+                    ProjectOpenOptions::default(),
+                    cx,
+                );
             }
         });
         test_cx.run_until_parked();
         view.read_with(test_cx, |view, _| {
             assert!(view.requests.error);
             assert!(view.requests.status.contains("source file listing failed"));
-            assert_eq!(view.session.project_root, next.0.canonicalize().unwrap());
+            assert_eq!(
+                view.controller.snapshot().project_root,
+                next.0.canonicalize().unwrap()
+            );
             assert_eq!(view.project.session_path, next_session);
             assert!(view.project.files.is_empty());
             assert!(view.search.query.is_empty());
             assert!(
-                !view.project.autosave,
+                matches!(
+                    view.controller.destination(),
+                    refscape_application::SaveDestination::Protected { .. }
+                ),
                 "Enumeration failure must protect the saved session"
             );
-            assert!(view.project.pending.is_none());
+            assert!(view.controller.pending_project().is_none());
         });
         view.update(test_cx, |view, cx| view.save(cx));
         test_cx.run_until_parked();
@@ -336,14 +410,14 @@ fn launch_settings_survive_first_folder_picker_and_clear_after_opening(cx: &mut 
     let project = TemporaryProject::new();
     let next = TemporaryProject::new();
     let requests = Arc::new(Mutex::new(vec![]));
-    let options = ProjectOptions {
+    let options = ProjectOpenOptions {
         language: ProjectLanguage::Cpp,
         compilation_database: Some(project.0.join("build/compile_commands.json")),
     };
-    let explorer = Explorer::new(
+    let explorer = FixtureDriver::new(
         ProjectLanguageFixture {
             requests: requests.clone(),
-            options: ProjectOptions::default(),
+            options: ProjectOpenOptions::default(),
             require_database: false,
             files_error: false,
             rejected_database: None,
@@ -351,7 +425,7 @@ fn launch_settings_survive_first_folder_picker_and_clear_after_opening(cx: &mut 
         ProjectRepositoryFixture(None),
     );
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             PathBuf::new(),
             vec![],
@@ -363,15 +437,30 @@ fn launch_settings_survive_first_folder_picker_and_clear_after_opening(cx: &mut 
     });
     cx.run_until_parked();
     view.update(cx, |view, cx| {
-        view.open_project_with_session(project.0.clone(), project.0.join("session.json"), cx)
+        view.open_project_with_session_options(
+            project.0.clone(),
+            project.0.join("session.json"),
+            view.project.launch_options.clone(),
+            cx,
+        )
     });
     cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert!(!view.controller.error(), "{}", view.controller.status());
+        assert!(!view.controller.busy(), "{}", view.controller.status());
+        assert!(!view.controller.closing(), "Unexpected close state");
+    });
     assert_eq!(requests.lock().unwrap()[0].1, options);
     view.update(cx, |view, cx| {
-        view.open_project_with_session(next.0.clone(), next.0.join("session.json"), cx)
+        view.open_project_with_session_options(
+            next.0.clone(),
+            next.0.join("session.json"),
+            view.project.launch_options.clone(),
+            cx,
+        )
     });
     cx.run_until_parked();
-    assert_eq!(requests.lock().unwrap()[1].1, ProjectOptions::default());
+    assert_eq!(requests.lock().unwrap()[1].1, ProjectOpenOptions::default());
 }
 
 #[gpui::test]
@@ -382,33 +471,37 @@ fn failed_session_startup_build_settings_retry_targets_saved_source_root(cx: &mu
     let replacement = saved_project.0.join("build/compile_commands.json");
     let saved_path = saved_project.0.join("session.json");
     std::fs::write(&saved_path, "fixture").unwrap();
-    let mut saved = Session::new(saved_project.0.canonicalize().unwrap());
-    saved.project_options = ProjectOptions {
+    let mut saved = ApplicationSnapshot::new(saved_project.0.canonicalize().unwrap());
+    saved.project_options = ProjectOpenOptions {
         language: ProjectLanguage::Cpp,
         compilation_database: Some(missing_database.clone()),
     };
     let requests = Arc::new(Mutex::new(vec![]));
-    let mut explorer = Explorer::new(
+    let mut explorer = FixtureDriver::new(
         ProjectLanguageFixture {
             requests: requests.clone(),
-            options: ProjectOptions::default(),
+            options: ProjectOpenOptions::default(),
             require_database: false,
             files_error: false,
             rejected_database: Some(missing_database),
         },
         ProjectRepositoryFixture(Some(saved)),
     );
-    explorer
-        .open_project(&previous.0, &ProjectOptions::default())
-        .unwrap();
     let previous_path = previous.0.join("session.json");
+    explorer
+        .dispatch(Command::OpenProject {
+            root: previous.0.clone(),
+            options: ProjectOpenOptions::default(),
+            destination: previous_path.clone(),
+        })
+        .unwrap();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        ExplorerView::new(
+        ExplorerView::from_fixture(
             explorer,
             previous_path.clone(),
             vec![],
             None,
-            ProjectOptions::default(),
+            ProjectOpenOptions::default(),
             window,
             cx,
         )
@@ -419,12 +512,12 @@ fn failed_session_startup_build_settings_retry_targets_saved_source_root(cx: &mu
     view.read_with(cx, |view, _| {
         assert!(view.requests.error);
         assert_eq!(
-            view.session.project_root,
+            view.controller.snapshot().project_root,
             previous.0.canonicalize().unwrap()
         );
         assert_eq!(view.project.session_path, previous_path);
         assert_eq!(
-            view.project.pending,
+            pending_project(view),
             Some((saved_project.0.canonicalize().unwrap(), saved_path.clone()))
         );
     });
@@ -435,12 +528,15 @@ fn failed_session_startup_build_settings_retry_targets_saved_source_root(cx: &mu
     view.read_with(cx, |view, _| {
         assert!(!view.requests.error, "{}", view.requests.status);
         assert_eq!(
-            view.session.project_root,
+            view.controller.snapshot().project_root,
             saved_project.0.canonicalize().unwrap()
         );
         assert_eq!(view.project.session_path, saved_path);
         assert_eq!(
-            view.session.project_options.compilation_database,
+            view.controller
+                .snapshot()
+                .project_options
+                .compilation_database,
             Some(replacement)
         );
     });
@@ -448,4 +544,23 @@ fn failed_session_startup_build_settings_retry_targets_saved_source_root(cx: &mu
         requests.lock().unwrap()[2].0,
         saved_project.0.canonicalize().unwrap()
     );
+}
+
+fn pending_project(view: &ExplorerView) -> Option<(PathBuf, PathBuf)> {
+    use refscape_application::effect::ProjectRequest;
+    match view.controller.pending_project()? {
+        ProjectRequest::Fresh {
+            root, destination, ..
+        } => Some((root.clone(), destination.clone())),
+        ProjectRequest::Loaded {
+            loaded,
+            destination,
+            ..
+        } => Some((loaded.snapshot.project_root.clone(), destination.clone())),
+        ProjectRequest::Saved {
+            path,
+            expected_root,
+            ..
+        } => expected_root.clone().map(|root| (root, path.clone())),
+    }
 }

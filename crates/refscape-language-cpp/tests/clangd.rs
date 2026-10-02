@@ -1,7 +1,7 @@
 //! Real clangd coverage is opt-in because LLVM is an external dependency.
-use refscape_application::ports::LanguageService;
+mod support;
 use refscape_language_cpp::Clangd;
-use refscape_model::{Position, ProjectLanguage, ProjectOptions, SourceRange, Symbol};
+use refscape_model::{Position, ProjectLanguage, ProjectOpenOptions, SourceRange, Symbol};
 use serde_json::json;
 use std::{
     env, fs,
@@ -94,11 +94,12 @@ fn cpp_method_and_function_cards_preserve_namespace_class_and_struct_context() {
     let text = "namespace outer {\n    namespace inner {\n        class Project {\n        public:\n            int first() const { return 1; }\n\n            int options() const {\n                return 42;\n            }\n        };\n        struct Settings {\n            int value() const { return 7; }\n        };\n\n        int helper() { return 3; }\n    }\n}\nint main() {\n    outer::inner::Project project;\n    int earlier = project.first();\n    return project.options() + earlier;\n}\n";
     let path = fixture.write("source/main.cpp", text);
     let database = fixture.database(std::slice::from_ref(&path), "clang++", &["-std=c++17"]);
-    let mut language = Clangd::default().with_timeout(Duration::from_secs(30));
+    let mut language =
+        support::Opened::new(Clangd::default()).with_timeout(Duration::from_secs(30));
     language
         .open_project(
             &fixture.0.join("source"),
-            &ProjectOptions {
+            &ProjectOpenOptions {
                 language: ProjectLanguage::Cpp,
                 compilation_database: Some(database),
             },
@@ -140,9 +141,12 @@ fn cpp_method_and_function_cards_preserve_namespace_class_and_struct_context() {
             text.lines().nth(body_line as usize),
             "{name}"
         );
-        let row = source.display_row(Position::new(body_line, 16)).unwrap();
+        let projection = refscape_model::CardSource::try_from(source.clone()).unwrap();
+        let row = projection
+            .display_row(Position::new(body_line, 16))
+            .unwrap();
         assert_eq!(
-            source.display_lines()[row].position,
+            projection.display_lines()[row].position,
             Some(Position::new(body_line, 0))
         );
         source.validate().unwrap();
@@ -166,93 +170,32 @@ fn cpp_method_and_function_cards_preserve_namespace_class_and_struct_context() {
     let main = language.source(find(&symbols, "main").unwrap()).unwrap();
     assert!(main.context.is_empty());
 
-    // Actual C++ expansions use the same source-order placement as every other language.
-    struct NoSession;
-    impl refscape_application::ports::SessionRepository for NoSession {
-        fn save(&self, _: &std::path::Path, _: &refscape_model::Session) -> Result<(), String> {
-            unreachable!()
-        }
-        fn load(&self, _: &std::path::Path) -> Result<refscape_model::Session, String> {
-            unreachable!()
-        }
-    }
-    let options = language.project_options();
-    let mut explorer = refscape_application::explorer::Explorer::new(language, NoSession);
-    explorer
-        .open_project(&fixture.0.join("source"), &options)
-        .unwrap();
-    let root = explorer
-        .add_symbol(
-            find(&symbols, "main").unwrap().clone(),
-            refscape_model::Point::default(),
-        )
-        .unwrap();
-    let later = explorer
-        .expand_definition(&root, at(text, 20, "options"))
+    let later = language
+        .definitions(&path, at(text, 20, "options"))
         .unwrap()
         .remove(0);
-    let earlier = explorer
-        .expand_definition(&root, at(text, 19, "first"))
+    let earlier = language
+        .definitions(&path, at(text, 19, "first"))
         .unwrap()
         .remove(0);
-    let cards = &explorer.session().cards;
-    let later = cards.iter().find(|card| card.id == later).unwrap();
-    let earlier = cards.iter().find(|card| card.id == earlier).unwrap();
-    assert_eq!(earlier.position.x, later.position.x);
-    assert!(earlier.position.y + earlier.display_height() < later.position.y);
-    assert_eq!(earlier.source.context.len(), 3);
-    assert_eq!(later.source.context.len(), 3);
-    let later_id = later.id.clone();
-    let target = explorer
-        .expand_definition(&later_id, at(text, 2, "Project"))
-        .unwrap()
-        .remove(0);
-    assert_eq!(
-        explorer
-            .session()
-            .cards
-            .iter()
-            .find(|card| card.id == target)
-            .unwrap()
-            .source
-            .symbol
-            .name,
-        "Project"
-    );
-    explorer.expand_context(&later_id, 2).unwrap();
-    let card = explorer
-        .session()
-        .cards
-        .iter()
-        .find(|card| card.id == later_id)
-        .unwrap();
-    assert!(card.source.context[2].code.contains("int first()"));
-    assert!(card.source.contains_display_position(at(text, 4, "first")));
-    assert_eq!(card.source.display_row(at(text, 6, "options")), Some(6));
-    let expanded = card.source.clone();
-    explorer.collapse_context(&later_id, 2).unwrap();
-    let folded = &explorer
-        .session()
-        .cards
-        .iter()
-        .find(|card| card.id == later_id)
-        .unwrap()
-        .source;
-    assert_eq!(folded.context[2].code, "        class Project {");
-    assert!(!folded.contains_display_position(at(text, 4, "first")));
-    assert!(folded.expanded.is_empty());
-    explorer.expand_context(&later_id, 2).unwrap();
-    assert_eq!(
-        explorer
-            .session()
-            .cards
-            .iter()
-            .find(|card| card.id == later_id)
-            .unwrap()
-            .source,
-        expanded
-    );
-    explorer.session().validate().unwrap();
+    assert!(earlier.range.start < later.range.start);
+    assert_eq!(language.source(&earlier).unwrap().context.len(), 3);
+    let mut card = refscape_model::CardSource::try_from(language.source(&later).unwrap()).unwrap();
+    assert_eq!(card.context.len(), 3);
+    let targets = language.definitions(&path, at(text, 2, "Project")).unwrap();
+    assert_eq!(targets[0].name, "Project");
+    card.toggle_fold(2).unwrap();
+    assert!(card.export_context()[2].code.contains("int first()"));
+    assert!(card.contains_display_position(at(text, 4, "first")));
+    assert_eq!(card.display_row(at(text, 6, "options")), Some(6));
+    let expanded = card.to_document();
+    card.toggle_fold(2).unwrap();
+    assert_eq!(card.context[2].code, "        class Project {");
+    assert!(!card.contains_display_position(at(text, 4, "first")));
+    assert!(card.export_expanded().is_empty());
+    card.toggle_fold(2).unwrap();
+    assert_eq!(card.to_document(), expanded);
+    card.validate().unwrap();
 }
 
 #[test]
@@ -275,11 +218,12 @@ fn cpp_headers_navigation_tokens_and_failed_project_switches() {
         &["-std=c++17"],
     );
     let root = fixture.0.join("source");
-    let options = ProjectOptions {
+    let options = ProjectOpenOptions {
         language: ProjectLanguage::Cpp,
         compilation_database: Some(database.clone()),
     };
-    let mut language = Clangd::default().with_timeout(Duration::from_secs(30));
+    let mut language =
+        support::Opened::new(Clangd::default()).with_timeout(Duration::from_secs(30));
     language.open_project(&root, &options).unwrap();
     assert_eq!(language.project_options(), options);
     assert!(language.project_crates().unwrap().is_empty());
@@ -365,7 +309,7 @@ fn cpp_headers_navigation_tokens_and_failed_project_switches() {
             .iter()
             .any(|symbol| symbol.path == main && symbol.name == "entry")
     });
-    let bad = ProjectOptions {
+    let bad = ProjectOpenOptions {
         compilation_database: Some(root.join("missing/compile_commands.json")),
         ..options.clone()
     };
@@ -383,7 +327,7 @@ fn cpp_headers_navigation_tokens_and_failed_project_switches() {
         language
             .open_project(
                 unknown.parent().unwrap(),
-                &refscape_model::ProjectOptions::default()
+                &refscape_model::ProjectOpenOptions::default()
             )
             .is_err()
     );
@@ -407,11 +351,12 @@ fn c_language_database_macros_and_no_database_fallback() {
         &["-std=c11", "-DREFSCAPE_FACTOR=7"],
     );
     let root = fixture.0.join("source");
-    let mut language = Clangd::default().with_timeout(Duration::from_secs(30));
+    let mut language =
+        support::Opened::new(Clangd::default()).with_timeout(Duration::from_secs(30));
     language
         .open_project(
             &root,
-            &ProjectOptions {
+            &ProjectOpenOptions {
                 language: ProjectLanguage::Cpp,
                 compilation_database: Some(database),
             },
@@ -441,7 +386,7 @@ fn c_language_database_macros_and_no_database_fallback() {
     language
         .open_project(
             fallback.parent().unwrap(),
-            &refscape_model::ProjectOptions::default(),
+            &refscape_model::ProjectOpenOptions::default(),
         )
         .unwrap();
     assert_eq!(language.project_options().compilation_database, None);
@@ -463,7 +408,7 @@ fn c_language_database_macros_and_no_database_fallback() {
     language
         .open_project(
             fallback_cpp.parent().unwrap(),
-            &refscape_model::ProjectOptions::default(),
+            &refscape_model::ProjectOpenOptions::default(),
         )
         .unwrap();
     assert!(
@@ -487,14 +432,14 @@ fn c_language_database_macros_and_no_database_fallback() {
 fn startup_errors_identify_the_required_c_cpp_server() {
     let fixture = Fixture::new();
     fixture.write("main.cpp", "int main() {}");
-    let mut language = Clangd::new(fixture.0.join("no-clangd"));
+    let mut language = support::Opened::new(Clangd::new(fixture.0.join("no-clangd")));
     let error = language
-        .open_project(&fixture.0, &refscape_model::ProjectOptions::default())
+        .open_project(&fixture.0, &refscape_model::ProjectOpenOptions::default())
         .unwrap_err();
     assert!(
         error.contains("cannot start clangd") && error.contains("REFSCAPE_CLANGD"),
         "{error}"
     );
     assert!(!error.contains("rustup"), "{error}");
-    assert_eq!(language.project_options(), ProjectOptions::default());
+    assert_eq!(language.project_options(), ProjectOpenOptions::default());
 }

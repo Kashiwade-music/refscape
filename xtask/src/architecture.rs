@@ -3,6 +3,8 @@ use std::{collections::BTreeMap, fs, path::Path};
 use cargo_metadata::{Dependency, DependencyKind, Metadata, MetadataCommand, Package};
 
 const MODEL: &str = "refscape-model";
+const ANALYSIS: &str = "refscape-analysis";
+const SUPPORT: &str = "refscape-language-support";
 const CANVAS: &str = "refscape-canvas";
 const APPLICATION: &str = "refscape-application";
 const LSP: &str = "refscape-lsp";
@@ -18,20 +20,22 @@ const APP: &str = "refscape-app";
 // A new member must be deliberately registered here; no default allow rule.
 const POLICY: &[(&str, &[&str])] = &[
     (MODEL, &[]),
+    (ANALYSIS, &[MODEL]),
     (CANVAS, &[MODEL]),
-    (APPLICATION, &[CANVAS, MODEL]),
-    (LSP, &[MODEL]),
-    (RUST, &[APPLICATION, LSP, MODEL]),
-    (CPP, &[APPLICATION, LSP, MODEL]),
-    (TYPESCRIPT, &[APPLICATION, LSP, MODEL]),
-    (PYTHON, &[APPLICATION, LSP, MODEL]),
+    (APPLICATION, &[MODEL, ANALYSIS, CANVAS]),
+    (LSP, &[MODEL, ANALYSIS]),
+    (SUPPORT, &[MODEL, ANALYSIS, LSP]),
+    (RUST, &[MODEL, ANALYSIS, LSP, SUPPORT]),
+    (CPP, &[MODEL, ANALYSIS, LSP, SUPPORT]),
+    (TYPESCRIPT, &[MODEL, ANALYSIS, LSP, SUPPORT]),
+    (PYTHON, &[MODEL, ANALYSIS, LSP, SUPPORT]),
     (
         LANGUAGE,
-        &[APPLICATION, MODEL, RUST, CPP, TYPESCRIPT, PYTHON],
+        &[MODEL, ANALYSIS, SUPPORT, RUST, CPP, TYPESCRIPT, PYTHON],
     ),
-    (STORAGE, &[APPLICATION, MODEL]),
-    (UI, &[APPLICATION, CANVAS, MODEL]),
-    (APP, &[APPLICATION, LANGUAGE, MODEL, STORAGE, UI]),
+    (STORAGE, &[MODEL, APPLICATION]),
+    (UI, &[MODEL, APPLICATION]),
+    (APP, &[MODEL, ANALYSIS, APPLICATION, LANGUAGE, STORAGE, UI]),
 ];
 
 struct Edge {

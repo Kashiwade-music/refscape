@@ -1,19 +1,59 @@
 //! Source discovery and compilation-database selection, independent of clangd startup.
-use refscape_model::{ProjectLanguage, ProjectOptions};
-use serde_json::Value;
+use refscape_model::{
+    ErrorKind, OperationContext, ProjectLanguage, ProjectOpenOptions, RefscapeError,
+};
+use serde::Deserialize;
 use std::{
     collections::BTreeSet,
     fs,
+    hash::{Hash, Hasher},
+    io::Read,
     path::{Path, PathBuf},
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompilationConfig {
+    ExplicitDatabase(PathBuf),
+    DetectedDatabase(PathBuf),
+    DelegateToClangd,
+    Fallback,
+}
 
 pub(crate) struct CppProject {
     pub(crate) database: Option<PathBuf>,
     translation_units: Vec<PathBuf>,
+    pub(crate) configuration: CompilationConfig,
+    pub(crate) metadata_fingerprint: u64,
 }
 
 impl CppProject {
-    pub(crate) fn discover(root: &Path, options: &ProjectOptions) -> Result<Self, String> {
+    #[cfg(test)]
+    pub(crate) fn discover(root: &Path, options: &ProjectOpenOptions) -> Result<Self, String> {
+        Self::discover_with_context(
+            root,
+            options,
+            &OperationContext::detached(std::time::Duration::from_secs(120)),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn discover_with_context(
+        root: &Path,
+        options: &ProjectOpenOptions,
+        context: &OperationContext,
+    ) -> Result<Self, RefscapeError> {
+        context.check()?;
+        let result = Self::discover_snapshot(root, options, context);
+        context.check()?;
+        result
+    }
+
+    fn discover_snapshot(
+        root: &Path,
+        options: &ProjectOpenOptions,
+        context: &OperationContext,
+    ) -> Result<Self, RefscapeError> {
+        let delegate_to_clangd = root.join(".clangd").is_file();
         let database = if let Some(selected) = &options.compilation_database {
             let selected = if selected.is_absolute() {
                 selected.clone()
@@ -29,73 +69,123 @@ impl CppProject {
                 .file_name()
                 .is_none_or(|name| name != "compile_commands.json")
             {
-                return Err("Select compile_commands.json or the directory containing it".into());
+                return Err(RefscapeError::new(
+                    ErrorKind::InvalidData,
+                    "Select compile_commands.json or the directory containing it",
+                ));
             }
             Some(selected.canonicalize().map_err(|e| {
-                format!(
-                    "cannot open compilation database {}: {e}",
-                    selected.display()
+                RefscapeError::new(
+                    ErrorKind::Io,
+                    format!(
+                        "cannot open compilation database {}: {e}",
+                        selected.display()
+                    ),
                 )
             })?)
-        } else if root.join(".clangd").is_file() {
+        } else if delegate_to_clangd {
             // Conditional project configuration belongs to clangd. Saving a guessed
             // database here would force it over .clangd during session restoration.
             None
         } else {
-            let candidates = compilation_databases(root)?;
+            let candidates = compilation_databases_with_context(root, context)?;
             match candidates.as_slice() {
                 [] => None,
                 [only] => Some(only.clone()),
                 _ => {
-                    return Err(format!(
-                        "Multiple compilation databases found. Select compile_commands.json for the desired build configuration:\n{}",
-                        candidates
-                            .iter()
-                            .map(|path| path.display().to_string())
-                            .collect::<Vec<_>>()
-                            .join("\n")
+                    return Err(RefscapeError::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "Multiple compilation databases found. Select compile_commands.json for the desired build configuration:\n{}",
+                            candidates
+                                .iter()
+                                .map(|path| path.display().to_string())
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        ),
                     ));
                 }
             }
         };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        database.hash(&mut hasher);
         let translation_units = database
             .as_deref()
-            .map(database_files)
+            .map(|database| database_files(database, context, &mut hasher))
             .transpose()?
             .unwrap_or_default();
+        for name in [".clangd", "compile_flags.txt"] {
+            context.check()?;
+            let path = root.join(name);
+            if path.is_file() {
+                path.hash(&mut hasher);
+                fs::read(&path)
+                    .map_err(|error| {
+                        RefscapeError::new(
+                            ErrorKind::Io,
+                            format!("cannot read {}: {error}", path.display()),
+                        )
+                    })?
+                    .hash(&mut hasher);
+            }
+        }
+        let configuration = match &database {
+            Some(path) if options.compilation_database.is_some() => {
+                CompilationConfig::ExplicitDatabase(path.clone())
+            }
+            Some(path) => CompilationConfig::DetectedDatabase(path.clone()),
+            None if delegate_to_clangd => CompilationConfig::DelegateToClangd,
+            None => CompilationConfig::Fallback,
+        };
         Ok(Self {
+            configuration,
             database,
             translation_units,
+            metadata_fingerprint: hasher.finish(),
         })
     }
 
-    pub(crate) fn options(&self) -> ProjectOptions {
-        ProjectOptions {
+    pub(crate) fn options(&self) -> ProjectOpenOptions {
+        ProjectOpenOptions {
             language: ProjectLanguage::Cpp,
             compilation_database: self.database.clone(),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn files(&self, root: &Path) -> Result<Vec<PathBuf>, String> {
-        let mut output = BTreeSet::new();
-        collect_cpp_files(root, &mut output)?;
+        self.files_with_context(
+            root,
+            &OperationContext::detached(std::time::Duration::from_secs(120)),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn files_with_context(
+        &self,
+        root: &Path,
+        context: &OperationContext,
+    ) -> Result<Vec<PathBuf>, RefscapeError> {
+        let mut output: BTreeSet<_> =
+            refscape_language_support::catalog::walk_with_context(root, POLICY, false, context)?
+                .into_iter()
+                .collect();
         // Database entries are authoritative even when a TU lies outside the source root,
         // has a nonstandard extension, or lives in a normally excluded build directory.
-        output.extend(
-            self.translation_units
-                .iter()
-                .filter(|path| path.is_file())
-                .cloned(),
-        );
+        for path in &self.translation_units {
+            context.check()?;
+            if path.is_file() {
+                output.insert(path.clone());
+            }
+        }
         Ok(output.into_iter().collect())
     }
 
-    pub(crate) fn index_seed(&self, root: &Path) -> Result<Option<PathBuf>, String> {
+    pub(crate) fn index_seed_from_files(&self, files: &[PathBuf]) -> Option<PathBuf> {
         if let Some(path) = self.translation_units.first() {
-            return Ok(Some(path.clone()));
+            return Some(path.clone());
         }
-        let files = self.files(root)?;
-        Ok(files
+        files
             .iter()
             .find(|path| {
                 path.extension()
@@ -108,11 +198,11 @@ impl CppProject {
                     })
             })
             .or_else(|| files.first())
-            .cloned())
+            .cloned()
     }
 }
 
-pub(crate) fn supports(root: &Path) -> Result<bool, String> {
+pub(crate) fn probe_markers(root: &Path) -> Result<bool, String> {
     Ok([
         "CMakeLists.txt",
         "CMakePresets.json",
@@ -121,148 +211,163 @@ pub(crate) fn supports(root: &Path) -> Result<bool, String> {
     ]
     .iter()
     .any(|name| root.join(name).is_file())
-        || !compilation_databases(root)?.is_empty()
-        || contains_cpp(root)?)
+        || !compilation_databases(root)?.is_empty())
+}
+
+pub(crate) fn supports(root: &Path) -> Result<bool, String> {
+    Ok(probe_markers(root)? || contains_cpp(root)?)
 }
 
 /// Search conventional build locations without descending an arbitrary directory tree.
 pub(crate) fn compilation_databases(root: &Path) -> Result<Vec<PathBuf>, String> {
+    compilation_databases_with_context(
+        root,
+        &OperationContext::detached(std::time::Duration::from_secs(120)),
+    )
+    .map_err(|error| error.to_string())
+}
+fn compilation_databases_with_context(
+    root: &Path,
+    context: &OperationContext,
+) -> Result<Vec<PathBuf>, RefscapeError> {
     let mut directories = vec![
         root.to_path_buf(),
         root.join("build"),
         root.join("out/build"),
     ];
     for parent in [root.join("build"), root.join("out/build")] {
+        context.check()?;
         if !parent.is_dir() {
             continue;
         }
-        for entry in
-            fs::read_dir(&parent).map_err(|e| format!("cannot list {}: {e}", parent.display()))?
-        {
-            let entry = entry.map_err(|e| e.to_string())?;
-            if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+        for entry in fs::read_dir(&parent).map_err(|e| {
+            RefscapeError::new(
+                ErrorKind::Io,
+                format!("cannot list {}: {e}", parent.display()),
+            )
+        })? {
+            context.check()?;
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
                 directories.push(entry.path());
             }
         }
     }
     let mut output = BTreeSet::new();
     for directory in directories {
+        context.check()?;
         let path = directory.join("compile_commands.json");
         if path.is_file() {
-            output.insert(
-                path.canonicalize()
-                    .map_err(|e| format!("cannot open {}: {e}", path.display()))?,
-            );
+            output.insert(path.canonicalize().map_err(|e| {
+                RefscapeError::new(
+                    ErrorKind::Io,
+                    format!("cannot open {}: {e}", path.display()),
+                )
+            })?);
         }
     }
     Ok(output.into_iter().collect())
 }
 
-fn database_files(database: &Path) -> Result<Vec<PathBuf>, String> {
-    let text = fs::read_to_string(database).map_err(|e| {
-        format!(
-            "cannot read compilation database {}: {e}",
-            database.display()
-        )
-    })?;
-    let value: Value = serde_json::from_str(&text)
-        .map_err(|e| format!("invalid compilation database {}: {e}", database.display()))?;
-    let entries = value.as_array().ok_or_else(|| {
-        format!(
-            "invalid compilation database {}: expected an array of compile commands",
-            database.display()
-        )
-    })?;
-    let mut output = BTreeSet::new();
-    for (index, entry) in entries.iter().enumerate() {
-        let invalid = || {
+#[derive(Deserialize)]
+struct CompileCommand {
+    directory: String,
+    file: String,
+    command: Option<String>,
+    arguments: Option<Vec<String>>,
+}
+struct SnapshotReader<'a, R> {
+    reader: R,
+    hasher: &'a mut std::collections::hash_map::DefaultHasher,
+    context: &'a OperationContext,
+}
+impl<R: Read> Read for SnapshotReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.context.check().map_err(std::io::Error::other)?;
+        let length = self.reader.read(buffer)?;
+        self.hasher.write(&buffer[..length]);
+        Ok(length)
+    }
+}
+fn database_files(
+    database: &Path,
+    context: &OperationContext,
+    hasher: &mut std::collections::hash_map::DefaultHasher,
+) -> Result<Vec<PathBuf>, RefscapeError> {
+    let reader = fs::File::open(database).map_err(|e| {
+        RefscapeError::new(
+            ErrorKind::Io,
             format!(
-                "invalid compilation database {}: entry {} needs directory, file, and command or nonempty arguments",
-                database.display(),
-                index + 1
+                "cannot read compilation database {}: {e}",
+                database.display()
+            ),
+        )
+    })?;
+    let reader = SnapshotReader {
+        reader,
+        hasher,
+        context,
+    };
+    let entries: Vec<CompileCommand> = serde_json::from_reader(std::io::BufReader::new(reader))
+        .map_err(|e| {
+            RefscapeError::new(
+                if e.is_io() {
+                    ErrorKind::Io
+                } else {
+                    ErrorKind::InvalidData
+                },
+                format!("invalid compilation database {}: {e}", database.display()),
+            )
+        })?;
+    let mut output = BTreeSet::new();
+    for (index, entry) in entries.into_iter().enumerate() {
+        context.check()?;
+        let invalid = || {
+            RefscapeError::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "invalid compilation database {}: entry {} needs directory, file, and command or nonempty arguments",
+                    database.display(),
+                    index + 1
+                ),
             )
         };
-        let directory = entry["directory"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(invalid)?;
-        let file = entry["file"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(invalid)?;
-        let valid_arguments = entry["arguments"]
-            .as_array()
-            .is_some_and(|args| !args.is_empty() && args.iter().all(|arg| arg.as_str().is_some()));
-        if !valid_arguments
-            && entry["command"]
-                .as_str()
-                .is_none_or(|s| s.trim().is_empty())
+        if entry.directory.is_empty()
+            || entry.file.is_empty()
+            || (!entry
+                .arguments
+                .as_ref()
+                .is_some_and(|args| !args.is_empty())
+                && entry
+                    .command
+                    .as_ref()
+                    .is_none_or(|command| command.trim().is_empty()))
         {
             return Err(invalid());
         }
-        let directory = Path::new(directory);
+        let directory = Path::new(&entry.directory);
         let directory = if directory.is_absolute() {
             directory.to_path_buf()
         } else {
             database.parent().ok_or_else(invalid)?.join(directory)
         };
-        let file = Path::new(file);
+        let file = Path::new(&entry.file);
         let path = if file.is_absolute() {
             file.to_path_buf()
         } else {
             directory.join(file)
         };
-        // Stale entries can describe sources that no longer exist; clangd handles them.
         if path.is_file() {
-            output.insert(
-                path.canonicalize()
-                    .map_err(|e| format!("cannot resolve {}: {e}", path.display()))?,
-            );
+            output.insert(path.canonicalize().map_err(|e| {
+                RefscapeError::new(
+                    ErrorKind::Io,
+                    format!("cannot resolve {}: {e}", path.display()),
+                )
+            })?);
         }
     }
     Ok(output.into_iter().collect())
 }
-
-fn excluded_directory(name: &str) -> bool {
-    matches!(
-        name,
-        ".git"
-            | ".hg"
-            | ".svn"
-            | "node_modules"
-            | "target"
-            | ".cache"
-            | ".clangd"
-            | "CMakeFiles"
-            | ".refscape"
-    )
-}
-
-pub(crate) fn cpp_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|s| s.to_str())
-        .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "c" | "cc"
-                    | "cpp"
-                    | "cxx"
-                    | "c++"
-                    | "h"
-                    | "hh"
-                    | "hpp"
-                    | "hxx"
-                    | "h++"
-                    | "inc"
-                    | "inl"
-                    | "ipp"
-                    | "tpp"
-                    | "ixx"
-                    | "cppm"
-            )
-        })
-}
-
 pub(crate) fn language_id(path: &Path) -> &'static str {
     // Uppercase .C is conventionally C++, while .h may be shared by both languages.
     match path.extension().and_then(|s| s.to_str()) {
@@ -271,38 +376,33 @@ pub(crate) fn language_id(path: &Path) -> &'static str {
     }
 }
 
+pub const POLICY: refscape_language_support::catalog::WalkPolicy =
+    refscape_language_support::catalog::WalkPolicy {
+        extensions: &[
+            "c", "cc", "cpp", "cxx", "c++", "h", "hh", "hpp", "hxx", "h++", "inc", "inl", "ipp",
+            "tpp", "ixx", "cppm",
+        ],
+        excluded: &[
+            ".git",
+            ".hg",
+            ".svn",
+            "node_modules",
+            "target",
+            ".cache",
+            ".clangd",
+            "CMakeFiles",
+            ".refscape",
+        ],
+        case_insensitive: true,
+        symlink_files: true,
+        exclude_virtual_environments: false,
+        canonical_paths: true,
+    };
 fn contains_cpp(root: &Path) -> Result<bool, String> {
-    for entry in fs::read_dir(root).map_err(|e| format!("cannot list {}: {e}", root.display()))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let kind = entry.file_type().map_err(|e| e.to_string())?;
-        if kind.is_dir() && !excluded_directory(&entry.file_name().to_string_lossy()) {
-            if contains_cpp(&entry.path())? {
-                return Ok(true);
-            }
-        } else if kind.is_file() && cpp_extension(&entry.path()) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    let mut policy = POLICY;
+    policy.symlink_files = false;
+    Ok(!refscape_language_support::catalog::walk(root, policy, true)?.is_empty())
 }
-
-fn collect_cpp_files(root: &Path, output: &mut BTreeSet<PathBuf>) -> Result<(), String> {
-    for entry in fs::read_dir(root).map_err(|e| format!("cannot list {}: {e}", root.display()))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let kind = entry.file_type().map_err(|e| e.to_string())?;
-        let path = entry.path();
-        if kind.is_dir() && !excluded_directory(&entry.file_name().to_string_lossy()) {
-            collect_cpp_files(&path, output)?;
-        } else if (kind.is_file() || kind.is_symlink() && path.is_file()) && cpp_extension(&path) {
-            output.insert(
-                path.canonicalize()
-                    .map_err(|e| format!("cannot resolve {}: {e}", path.display()))?,
-            );
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,7 +452,7 @@ mod tests {
         fixture.write("vendor/nested/compile_commands.json", "[]");
         fixture.write("build/deep/nested/compile_commands.json", "[]");
         assert_eq!(compilation_databases(&fixture.0).unwrap().len(), 2);
-        let error = CppProject::discover(&fixture.0, &ProjectOptions::default())
+        let error = CppProject::discover(&fixture.0, &ProjectOpenOptions::default())
             .err()
             .unwrap();
         assert!(
@@ -362,7 +462,7 @@ mod tests {
         );
         let project = CppProject::discover(
             &fixture.0,
-            &ProjectOptions {
+            &ProjectOpenOptions {
                 language: ProjectLanguage::Cpp,
                 compilation_database: Some("build/debug".into()),
             },
@@ -376,7 +476,7 @@ mod tests {
     #[test]
     fn invalid_databases_are_rejected_before_server_startup() {
         let fixture = Fixture::new();
-        let options = ProjectOptions {
+        let options = ProjectOpenOptions {
             language: ProjectLanguage::Cpp,
             compilation_database: Some("compile_commands.json".into()),
         };
@@ -402,7 +502,7 @@ mod tests {
         assert!(
             CppProject::discover(
                 &fixture.0,
-                &ProjectOptions {
+                &ProjectOpenOptions {
                     language: ProjectLanguage::Cpp,
                     compilation_database: Some("custom.json".into())
                 }
@@ -425,7 +525,7 @@ mod tests {
         let source = fixture.0.join("source");
         let project = CppProject::discover(
             &source,
-            &ProjectOptions {
+            &ProjectOpenOptions {
                 language: ProjectLanguage::Cpp,
                 compilation_database: Some("../build/compile_commands.json".into()),
             },
@@ -465,18 +565,18 @@ mod tests {
     fn fallback_and_clangd_configuration_are_preserved() {
         let fixture = Fixture::new();
         fixture.write("main.cpp", "int main() {}");
-        let project = CppProject::discover(&fixture.0, &ProjectOptions::default()).unwrap();
+        let project = CppProject::discover(&fixture.0, &ProjectOpenOptions::default()).unwrap();
         assert!(project.database.is_none());
         assert_eq!(project.files(&fixture.0).unwrap().len(), 1);
         fixture.write(".clangd", "CompileFlags:\n  Add: [-std=c++20]\n");
         fixture.write("build/compile_commands.json", "[]");
-        let project = CppProject::discover(&fixture.0, &ProjectOptions::default()).unwrap();
+        let project = CppProject::discover(&fixture.0, &ProjectOpenOptions::default()).unwrap();
         assert!(project.database.is_none());
         let project = CppProject::discover(
             &fixture.0,
-            &ProjectOptions {
+            &ProjectOpenOptions {
                 compilation_database: Some("build".into()),
-                ..ProjectOptions::default()
+                ..ProjectOpenOptions::default()
             },
         )
         .unwrap();

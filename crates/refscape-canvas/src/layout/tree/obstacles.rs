@@ -1,23 +1,22 @@
 use super::{
-    CardRect, LayoutRules, OrderedTree, check_cancelled, finite_f32, float_margin, validate_layout,
-    validate_tree,
+    CardRect, LayoutRules, OrderedTree, check_cancelled, finite_f32, float_margin, validate_tree,
 };
 use crate::Result;
-use refscape_model::CodeCard;
+use crate::layout::LayoutCard;
 
 pub(super) enum Placement {
-    Ready(Vec<CodeCard>),
+    Ready(Vec<LayoutCard>),
     WiderSpacing(f64),
 }
 
 /// Translate all descendants together, preserving every branch and level order.
 pub(super) fn avoid_fixed(
-    base: &[CodeCard],
+    base: &[LayoutCard],
     tree: &OrderedTree,
     rules: LayoutRules,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Placement> {
-    if validate_layout(base, rules).is_ok() {
+    if crate::layout::geometry::validate_layout_cancellable(base, rules, cancelled).is_ok() {
         return Ok(Placement::Ready(base.to_vec()));
     }
     let mut moving = vec![false; base.len()];
@@ -47,6 +46,9 @@ pub(super) fn avoid_fixed(
         let rect = rects[i];
         let gap = f64::from(rules.gap);
         for (j, other) in rects.iter().enumerate() {
+            if j % 64 == 0 {
+                check_cancelled(cancelled)?;
+            }
             if moving[j]
                 || f64::from(rect.position.x) >= other.right() + gap
                 || rect.right() + gap <= f64::from(other.position.x)
@@ -65,6 +67,7 @@ pub(super) fn avoid_fixed(
     intervals.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
     let mut merged: Vec<(f64, f64)> = Vec::new();
     for (lower, upper) in intervals {
+        check_cancelled(cancelled)?;
         if let Some(last) = merged.last_mut()
             && lower < last.1
         {
@@ -77,7 +80,7 @@ pub(super) fn avoid_fixed(
         .iter()
         .copied()
         .find(|(a, b)| *a < 0.0 && 0.0 < *b)
-        .ok_or("Cannot repair tree collisions with fixed cards")?;
+        .ok_or_else(|| crate::invalid("Cannot repair tree collisions with fixed cards"))?;
     let mut offsets = [lower, upper];
     offsets.sort_by(|a, b| {
         a.abs()
@@ -94,7 +97,10 @@ pub(super) fn avoid_fixed(
                 continue;
             }
             match finite_f32(f64::from(base[i].position.y) + dy) {
-                Ok(y) => candidate[i].position.y = y,
+                Ok(y) => {
+                    candidate[i].position =
+                        refscape_model::WorldPoint::new(candidate[i].position.x, y)?
+                }
                 Err(_) => {
                     finite = false;
                     break;
@@ -102,7 +108,8 @@ pub(super) fn avoid_fixed(
             }
         }
         if finite
-            && validate_layout(&candidate, rules).is_ok()
+            && crate::layout::geometry::validate_layout_cancellable(&candidate, rules, cancelled)
+                .is_ok()
             && validate_tree(&candidate, tree, rules).is_ok()
         {
             return Ok(Placement::Ready(candidate));
@@ -114,7 +121,8 @@ pub(super) fn avoid_fixed(
                 .all(|&i| candidate[i].validate_geometry().is_ok())
         {
             let reachable: Vec<_> = tree.order.iter().map(|&i| candidate[i].clone()).collect();
-            if validate_layout(&reachable, rules).is_err()
+            if crate::layout::geometry::validate_layout_cancellable(&reachable, rules, cancelled)
+                .is_err()
                 || validate_tree(&candidate, tree, rules).is_err()
             {
                 // Only internal tree spacing can request a rebuild. Fixed-card
@@ -139,5 +147,7 @@ pub(super) fn avoid_fixed(
     if let Some(margin) = required_margin {
         return Ok(Placement::WiderSpacing(margin));
     }
-    Err("Cannot place the ordered tree around fixed cards".into())
+    Err(crate::invalid(
+        "Cannot place the ordered tree around fixed cards",
+    ))
 }

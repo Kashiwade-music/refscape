@@ -1,15 +1,24 @@
 //! Canvas geometry and GPUI painting.
 mod code;
 
-use super::shaping::card_title;
-use super::*;
+use super::{render::color, scene, shaping::code_connections};
 use code::paint_code;
+use gpui::{
+    App, Bounds, PathBuilder, Pixels, ShapedLine, TextAlign, TextRun, Window, fill, point, px,
+    quad, size,
+};
+use refscape_application::{ApplicationSnapshot, VariableInspection};
+use refscape_model::{CODE_REGION_HEADER, CODE_REGION_PADDING, CodeCard, Point, Position};
 
 pub(super) struct PaintedCard {
     pub(super) id: String,
     pub(super) bounds: Bounds<Pixels>,
     pub(super) rows: Vec<PaintedRow>,
     pub(super) origin: gpui::Point<Pixels>,
+    pub(super) first_row: usize,
+    pub(super) source_revision: refscape_model::SourceRevision,
+    pub(super) fold_revision: refscape_model::FoldRevision,
+    pub(super) viewport: refscape_model::Viewport,
 }
 
 /// A row keeps its source mapping and each painted column together.
@@ -58,10 +67,19 @@ pub(super) fn card_height(card: &CodeCard) -> f32 {
 }
 pub(super) fn card_bounds(
     card: &CodeCard,
-    session: &Session,
+    session: &ApplicationSnapshot,
     canvas: Bounds<Pixels>,
 ) -> Bounds<Pixels> {
-    let position = session.viewport.world_to_screen(card.position);
+    bounds_at(card, card.position.point(), session, canvas)
+}
+
+pub(super) fn bounds_at(
+    card: &CodeCard,
+    position: Point,
+    session: &ApplicationSnapshot,
+    canvas: Bounds<Pixels>,
+) -> Bounds<Pixels> {
+    let position = session.viewport.world_to_screen(position);
     Bounds::new(
         point(
             canvas.left() + px(position.x),
@@ -75,16 +93,20 @@ pub(super) fn card_bounds(
 }
 
 pub(super) fn paint_canvas(
-    session: &Session,
+    session: &ApplicationSnapshot,
     interaction: (Option<&str>, Option<&(String, usize)>),
     inspection: Option<&VariableInspection>,
+    cache: &mut scene::SceneCache,
     bounds: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) -> Vec<PaintedCard> {
+    cache.begin_frame();
+    cache.index(session);
     let (selected, context_hover) = interaction;
     let palette = &session.theme.palette;
     let zoom = session.viewport.zoom;
+    let detail = scene::DetailLevel::from_zoom(zoom);
     let step = (32.0 * zoom).max(12.0);
     let mut y = session.viewport.offset.y.rem_euclid(step);
     while y < f32::from(bounds.size.height) {
@@ -101,15 +123,18 @@ pub(super) fn paint_canvas(
         }
         y += step;
     }
-    for region in &session.regions {
-        let is_crate = region.id.starts_with("project:") || region.id.starts_with("crate:");
-        if is_crate != (zoom < 0.35) {
+    for region in session.regions.iter() {
+        let is_crate = matches!(
+            region.kind,
+            refscape_model::RegionKind::Project | refscape_model::RegionKind::Crate
+        );
+        if is_crate != (detail == scene::DetailLevel::Region) {
             continue;
         }
-        let rects: Vec<_> = session
-            .cards
+        let rects: Vec<_> = region
+            .card_ids
             .iter()
-            .filter(|card| region.card_ids.contains(&card.id))
+            .filter_map(|id| cache.card(id).and_then(|index| session.cards.get(index)))
             .map(|card| card_bounds(card, session, bounds))
             .collect();
         if rects.is_empty() {
@@ -155,7 +180,7 @@ pub(super) fn paint_canvas(
             cx,
         );
     }
-    let connections = code_connections(session, bounds, window);
+    let connections = code_connections(session, bounds, cache, window);
     for connection in &connections {
         let end = connection.end;
         let mut path = PathBuilder::stroke(connection.underline.size.height);
@@ -175,9 +200,9 @@ pub(super) fn paint_canvas(
         }
     }
     let mut painted = vec![];
-    for card in &session.cards {
+    for card in session.cards.iter() {
         let rect = card_bounds(card, session, bounds);
-        if zoom < 0.35
+        if detail == scene::DetailLevel::Region
             || rect.right() < bounds.left()
             || rect.left() > bounds.right()
             || rect.bottom() < bounds.top()
@@ -201,10 +226,10 @@ pub(super) fn paint_canvas(
             }),
             Default::default(),
         ));
-        let (origin, rows) =
+        let (origin, first_row, rows) =
             window.with_content_mask(Some(gpui::ContentMask { bounds: rect }), |window| {
                 text(
-                    card_title(session, card),
+                    cache.title(card),
                     point(rect.left() + px(16.0 * zoom), rect.top() + px(8.0 * zoom)),
                     (13.0 * zoom).max(9.0),
                     color(&palette.text),
@@ -233,11 +258,11 @@ pub(super) fn paint_canvas(
                     window,
                     cx,
                 );
-                let (origin, rows) = paint_code(
+                let (origin, first_row, rows) = paint_code(
                     card,
                     session,
-                    context_hover,
-                    inspection,
+                    (context_hover, inspection),
+                    cache,
                     (rect, bounds),
                     window,
                     cx,
@@ -256,13 +281,17 @@ pub(super) fn paint_canvas(
                         window.paint_path(path, color(&palette.connection));
                     }
                 }
-                (origin, rows)
+                (origin, first_row, rows)
             });
         painted.push(PaintedCard {
-            id: card.id.clone(),
+            id: card.id.to_string(),
             bounds: rect,
             rows,
             origin,
+            first_row,
+            source_revision: card.source.projection().source_revision,
+            fold_revision: card.source.projection().fold_revision,
+            viewport: session.viewport,
         });
     }
     if session.cards.is_empty() {
@@ -292,4 +321,32 @@ pub(super) fn paint_canvas(
         );
     }
     painted
+}
+
+impl PaintedCard {
+    pub(super) fn current(&self, snapshot: &ApplicationSnapshot) -> bool {
+        self.viewport == snapshot.viewport
+            && snapshot
+                .cards
+                .iter()
+                .find(|card| card.id.as_str() == self.id)
+                .is_some_and(|card| {
+                    card.source.projection().source_revision == self.source_revision
+                        && card.source.projection().fold_revision == self.fold_revision
+                })
+    }
+    pub(super) fn row(&self, index: usize) -> Option<&PaintedRow> {
+        self.rows.get(index.checked_sub(self.first_row)?)
+    }
+}
+impl PaintedRow {
+    pub(super) fn source_position(&self, x: Pixels) -> Option<Position> {
+        let origin = self.position?;
+        let byte = self.code.index_for_x(x)?;
+        let units = u32::try_from(self.code.text.get(..byte)?.encode_utf16().count()).ok()?;
+        Some(Position::new(
+            origin.line,
+            origin.character.checked_add(units)?,
+        ))
+    }
 }

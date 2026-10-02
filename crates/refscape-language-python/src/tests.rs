@@ -1,37 +1,45 @@
 use super::*;
-
 #[test]
 fn incompatible_options_are_rejected_before_launching_a_server() {
     for options in [
-        ProjectOptions {
+        ProjectOpenOptions {
             language: ProjectLanguage::Rust,
             compilation_database: None,
         },
-        ProjectOptions {
+        ProjectOpenOptions {
             language: ProjectLanguage::Python,
             compilation_database: Some("compile_commands.json".into()),
         },
     ] {
-        let mut language = Pyright::new("missing-language-server");
-        assert!(
-            language
-                .open_project(Path::new("."), &options)
-                .unwrap_err()
-                .contains("compilation databases")
-        );
-        assert_eq!(language.project_options(), ProjectOptions::default());
+        let language = Python::new("missing-language-server");
+        let error = language
+            .prepare(
+                Path::new("."),
+                &options,
+                &OperationContext::detached(std::time::Duration::from_secs(5)),
+            )
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("compilation databases"));
     }
 }
-
 #[test]
-fn requests_without_an_open_project_return_errors() {
-    let mut language = Python::default();
-    assert!(language.files().is_err());
-    assert!(language.search("").is_err());
-    assert!(language.symbols(Path::new("module.py")).is_err());
-    assert!(
-        language
-            .definitions(Path::new("module.py"), Position::default())
-            .is_err()
-    );
+fn factory_preparation_errors_are_repeatable_without_an_unopened_session() {
+    let factory =
+        Python::from_environment("missing-language-server", EnvironmentSnapshot::default());
+    let options = ProjectOpenOptions {
+        language: ProjectLanguage::Python,
+        compilation_database: None,
+    };
+    for _ in 0..2 {
+        let error = factory
+            .prepare(
+                Path::new("."),
+                &options,
+                &OperationContext::detached(std::time::Duration::from_secs(5)),
+            )
+            .err()
+            .unwrap();
+        assert_eq!(error.kind, ErrorKind::BackendUnavailable);
+    }
 }

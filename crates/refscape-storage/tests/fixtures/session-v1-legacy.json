@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "project_root": "legacy-project",
+  "layout_settings": {"auto_compact_enabled": "obsolete"},
+  "cards": [
+    {
+      "id": "legacy:opaque",
+      "source": {
+        "symbol": {"id": "legacy:symbol", "name": "old", "kind": "function", "path": "legacy-project/missing.rs", "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 11}}, "selection_range": {"start": {"line": 2, "character": 3}, "end": {"line": 2, "character": 6}}},
+        "code": "fn old() {}",
+        "context": [{"start_line": 0, "code": "mod legacy {\n    // already visible"}]
+      },
+      "position": {"x": -10.0, "y": -20.0}, "width": 520.0, "height": 128.0
+    },
+    {
+      "id": "legacy:plain",
+      "source": {
+        "symbol": {"id": "legacy:file", "name": "empty.rs", "kind": "file", "path": "legacy-project/empty.rs", "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "selection_range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}},
+        "code": ""
+      },
+      "position": {"x": 900.0, "y": 50.0}, "width": 520.0, "height": 128.0
+    }
+  ],
+  "connections": [{"id": "legacy:edge", "from": "legacy:opaque", "to": "legacy:plain", "kind": "definition", "source": {"line": 2, "character": 3}}],
+  "viewport": {"offset": {"x": 12.0, "y": -7.0}, "zoom": 1.0},
+  "theme": {"name": "Legacy custom", "palette": {"background": "#010203", "surface": "#111213", "surface_alt": "#212223", "text": "#f1f2f3", "muted": "#818283", "accent": "#aa55ff", "border": "#313233", "connection": "#414243", "syntax_keyword": "#515253", "syntax_string": "#616263", "syntax_type": "#717273", "syntax_function": "#919293"}}
+}
