@@ -88,6 +88,10 @@ impl Workflow {
             })
             .expect("Files result"))
     }
+    pub fn refresh_sources(&mut self) -> Result<(), String> {
+        self.run(Command::RefreshSources)?;
+        Ok(())
+    }
     pub fn symbols(&mut self, path: &Path) -> Result<Vec<Symbol>, String> {
         Ok(self
             .run(Command::Symbols(path.to_path_buf()))?

@@ -22,6 +22,7 @@ pub struct Transition {
     pub events: Vec<ViewEvent>,
 }
 pub enum ViewEvent {
+    SourceReloaded,
     Reset,
     Files(Vec<PathBuf>),
     Symbols(Vec<refscape_model::Symbol>),
@@ -279,6 +280,25 @@ impl ApplicationController {
     }
     fn dispatch_inner(&mut self, command: Command, t: &mut Transition) -> Result<()> {
         match command {
+            Command::RefreshSources => {
+                if self.is_open()
+                    && !self.closing
+                    && !self.busy()
+                    && !self.dragging
+                    && !self
+                        .jobs
+                        .records
+                        .values()
+                        .any(|record| record.class == JobClass::Reload)
+                    && !self.snapshot.cards.is_empty()
+                {
+                    self.query(
+                        JobClass::Reload,
+                        AnalysisQuery::RefreshSources(self.snapshot.cards.clone()),
+                        t,
+                    );
+                }
+            }
             Command::Pan(delta) => {
                 let viewport = Viewport {
                     offset: Point::new(
@@ -836,6 +856,7 @@ impl ApplicationController {
         Ok(())
     }
     fn switch(&mut self, request: ProjectRequest, t: &mut Transition) -> Result<()> {
+        self.cancel(JobClass::Reload, t);
         self.cancel(JobClass::Hover, t);
         self.cancel(JobClass::Inspection, t);
         self.cancel(JobClass::Arrange, t);
@@ -931,6 +952,7 @@ impl ApplicationController {
             self.status_event("A request is running. Close again after it finishes so the complete session can be saved.",false,t);
             return;
         }
+        self.cancel(JobClass::Reload, t);
         self.cancel(JobClass::Hover, t);
         self.cancel(JobClass::Arrange, t);
         self.cancel(JobClass::Inspection, t);

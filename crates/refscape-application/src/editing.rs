@@ -44,7 +44,16 @@ pub struct AcquiredNavigationTarget {
     pub location: refscape_analysis::NavigationLocation,
 }
 #[derive(Clone)]
+pub struct RefreshedCard {
+    pub id: CardId,
+    pub source: Option<CardSource>,
+    pub content_changed: bool,
+}
+#[derive(Clone)]
 pub enum PreparedEdit {
+    Reload {
+        cards: Vec<RefreshedCard>,
+    },
     Add {
         source: CardSource,
         position: Point,
@@ -166,6 +175,50 @@ pub fn plan_edit(
     let mut undo = None;
     let mut invalidates_undo = false;
     match edit {
+        PreparedEdit::Reload { cards: refreshed } => {
+            let mut invalidated = BTreeSet::new();
+            for update in refreshed {
+                context.check()?;
+                if let Some(card) = cards.iter_mut().find(|card| card.id == update.id) {
+                    if let Some(source) = &update.source {
+                        card.source = source.clone();
+                        if update.content_changed {
+                            let (width, height) = source_dimensions(source);
+                            card.width = width;
+                            card.height = height;
+                        }
+                    }
+                    if update.content_changed {
+                        invalidated.insert(update.id.clone());
+                    }
+                }
+            }
+            let removed: BTreeSet<_> = refreshed
+                .iter()
+                .filter(|update| update.source.is_none())
+                .map(|update| update.id.clone())
+                .collect();
+            cards.retain(|card| !removed.contains(&card.id));
+            let previous_edges = edges.len();
+            edges.retain(|edge| {
+                !invalidated.contains(&edge.from)
+                    && !removed.contains(&edge.from)
+                    && !removed.contains(&edge.to)
+            });
+            let visible_change = refreshed.iter().any(|update| update.content_changed);
+            if visible_change {
+                let delta = refscape_canvas::layout::plan_restore_repair_with_context(
+                    &layout_cards(&cards)?,
+                    LayoutRules::default(),
+                    context,
+                )?;
+                apply_delta(&mut cards, &delta)?;
+            }
+            topology = !removed.is_empty() || previous_edges != edges.len();
+            content = !refreshed.is_empty();
+            geometry = visible_change;
+            invalidates_undo = visible_change;
+        }
         PreparedEdit::Add { source, position } => {
             let (id, added) = insert(&mut cards, source.clone(), *position, None, context)?;
             outcome.targets.push(id.to_string());

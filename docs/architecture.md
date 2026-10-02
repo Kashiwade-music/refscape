@@ -23,7 +23,7 @@
 
 `ApplicationController`だけが可変project/canvas正本を持つ。UIはintentをcommandとして渡し、workerはimmutable snapshotと解析sessionを使ってeffectを実行する。headless checkも同じcontrollerを駆動する。completionはjob/project/revisionを照合して採用し、旧projectの遅着結果を混入させない。I/O中にcontrollerをlockしない。
 
-カードはArc source snapshotとfold状態を持ち、projection・UTF-16 index・寸法を共有する。canvas plannerはID・矩形・edge・順序のみを受け取る。saved sourceはimport後にディスク更新へ自動追従しない。serializationはstorageだけが所有し、v1のID・保存順・source・themeを保持する。未接続Settings APIは撤去した。
+カードはArc source snapshotとfold状態を持ち、projection・UTF-16 index・寸法を共有する。canvas plannerはID・矩形・edge・順序のみを受け取る。復元と定期監視のworkerはファイル内容のfingerprintを比較し、変更されたsourceだけ公式解析から再取得する。controllerは世代を照合してsource・寸法・接続を一括更新し、viewportとカードidentityを保持する。serializationはstorageだけが所有し、v1のID・保存順・source・themeを保持する。fingerprintは省略可能なv1フィールドで、旧セッションも引き続き読める。未接続Settings APIは撤去した。
 
 LSPは共通Tokio runtimeでreader/writer/dispatcher/supervisorを稼働させる。operationの絶対期限とcancelをRPC・file/process処理へ通し、server refreshをcache epochへ反映する。queueとcacheには上限があり、process終了をUI threadで待たない。各言語のwarmup順とsearch merge優先順はprofileで保持する。コード構造の解析はLSP等の公式機能を使い、独自構文推測で補わない。
 

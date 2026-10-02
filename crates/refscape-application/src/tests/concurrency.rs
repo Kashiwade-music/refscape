@@ -389,6 +389,7 @@ fn duplicate_project_completion_cannot_dispose_current_analysis() {
             files: vec![],
             protection: None,
             listing_failed: false,
+            refreshed: false,
         })),
     };
     let transition = h.finish(duplicate);

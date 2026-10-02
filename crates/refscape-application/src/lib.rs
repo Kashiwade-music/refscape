@@ -8,6 +8,7 @@ pub mod jobs;
 pub mod navigation;
 pub mod persistence;
 pub mod ports;
+mod reload;
 pub mod state;
 pub use command::{Command, NavigationMode};
 pub use controller::{ApplicationController, Transition, ViewEvent};

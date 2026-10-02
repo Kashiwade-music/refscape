@@ -225,6 +225,10 @@ fn symbols_then_source_capture_one_file_for_the_entire_job() {
     let job = context();
     let symbols = session.symbols(&files.source(), &job).unwrap();
     assert_eq!(session.source(&symbols[0], &job).unwrap().code, "sample");
+    assert_eq!(
+        session.document_fingerprint(&files.source(), &job).unwrap(),
+        refscape_model::DocumentFingerprint::of(b"sample\n")
+    );
     assert_eq!(session.document_statistics().disk_reads, 1);
     assert_eq!(session.document_statistics().operation_snapshots, 1);
     session.finish_operation(&job);
@@ -236,6 +240,12 @@ fn symbols_then_source_capture_one_file_for_the_entire_job() {
         "changed unrelated text\n"
     );
     assert_eq!(session.document_statistics().disk_reads, 2);
+    assert_eq!(
+        session
+            .document_fingerprint(&files.source(), &context())
+            .unwrap(),
+        refscape_model::DocumentFingerprint::of(b"changed unrelated text\n")
+    );
 }
 #[test]
 fn highlights_then_hover_and_repeated_locations_share_the_job_snapshot() {

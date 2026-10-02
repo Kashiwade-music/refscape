@@ -74,6 +74,13 @@ pub struct SourceDocument {
     /// Revealed gap snapshots retained so each section can be folded again.
     #[serde(default)]
     pub expanded: Vec<SourceContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_fingerprint: Option<DocumentFingerprint>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentFingerprint {
+    pub byte_len: u64,
+    pub hash: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

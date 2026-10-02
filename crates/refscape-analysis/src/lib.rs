@@ -64,6 +64,20 @@ pub trait AnalysisFactory: Send + Sync {
 }
 
 pub trait AnalysisSession: Send {
+    /// Filesystem-backed sessions refresh saved and live sources from disk.
+    /// In-memory/virtual backends can opt out without exposing fake file paths.
+    fn supports_source_reload(&self) -> bool {
+        true
+    }
+    /// Identity of the immutable document captured by the current operation.
+    fn document_fingerprint(
+        &mut self,
+        _path: &Path,
+        context: &OperationContext,
+    ) -> AnalysisResult<Option<refscape_model::DocumentFingerprint>> {
+        context.check()?;
+        Ok(None)
+    }
     /// Releases immutable captures after a composite effect's final port call.
     fn finish_operation(&mut self, _context: &OperationContext) {}
     /// Runs on the effect worker. Dropping a handle starts disposal; this explicit

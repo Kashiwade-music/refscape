@@ -45,6 +45,9 @@ impl AnalysisFactory for Language {
     }
 }
 impl AnalysisSession for Language {
+    fn supports_source_reload(&self) -> bool {
+        false
+    }
     fn project_options(&self) -> ResolvedProjectOptions {
         resolved_options(&ProjectOpenOptions::default())
     }

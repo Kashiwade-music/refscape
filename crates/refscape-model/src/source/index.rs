@@ -129,6 +129,24 @@ pub struct DocumentSnapshot {
     pub version: u64,
     pub text: Arc<str>,
     pub index: TextIndex,
+    pub fingerprint: DocumentFingerprint,
+}
+/// Stable content identity for detecting disk edits across application launches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DocumentFingerprint {
+    pub byte_len: u64,
+    pub hash: u64,
+}
+impl DocumentFingerprint {
+    pub fn of(bytes: &[u8]) -> Self {
+        let hash = bytes.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+        Self {
+            byte_len: bytes.len() as u64,
+            hash,
+        }
+    }
 }
 impl DocumentSnapshot {
     pub fn new(path: PathBuf, version: u64, text: Arc<str>) -> Result<Self, RefscapeError> {
@@ -136,11 +154,13 @@ impl DocumentSnapshot {
             return Err(invalid("Document path must be nonempty"));
         }
         let index = TextIndex::new(&text)?;
+        let fingerprint = DocumentFingerprint::of(text.as_bytes());
         Ok(Self {
             path,
             version,
             text,
             index,
+            fingerprint,
         })
     }
 }

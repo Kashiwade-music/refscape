@@ -491,6 +491,13 @@ impl LspProjectSession {
             .as_ref()
             .clone())
     }
+    pub fn document_fingerprint(
+        &mut self,
+        path: &Path,
+        context: &OperationContext,
+    ) -> AnalysisResult<refscape_model::DocumentFingerprint> {
+        Ok(self.open_document(path, context)?.fingerprint)
+    }
     pub fn search(
         &mut self,
         query: &str,

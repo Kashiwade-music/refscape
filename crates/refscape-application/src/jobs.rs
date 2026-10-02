@@ -15,6 +15,7 @@ pub(crate) enum JobClass {
     Hover,
     Inspection,
     Save,
+    Reload,
 }
 pub(crate) struct JobRecord {
     pub class: JobClass,
@@ -94,7 +95,7 @@ impl OperationBudgetPolicy {
         let requests = match class {
             JobClass::Switch => 4, // initialize, readiness, seed symbols, optional token preparation
             JobClass::Search => files.max(1).saturating_mul(2).saturating_add(1),
-            JobClass::Edit => files.max(1).saturating_mul(3).saturating_add(1),
+            JobClass::Edit | JobClass::Reload => files.max(1).saturating_mul(3).saturating_add(1),
             JobClass::Query | JobClass::Inspection => 2,
             JobClass::Hover => 1,
             JobClass::Arrange | JobClass::Save => 0,
@@ -149,8 +150,11 @@ impl JobRegistry {
             .collect()
     }
     pub fn busy(&self) -> bool {
-        self.records
-            .values()
-            .any(|record| !matches!(record.class, JobClass::Hover | JobClass::Save))
+        self.records.values().any(|record| {
+            !matches!(
+                record.class,
+                JobClass::Hover | JobClass::Save | JobClass::Reload
+            )
+        })
     }
 }

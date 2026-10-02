@@ -148,12 +148,31 @@ impl WorkerExecutor {
             expected_root: None,
             overrides: ProjectOpenOptions::default(),
         };
-        let prepared =
+        let mut prepared =
             self.factory
                 .prepare(&snapshot.project_root, &snapshot.project_options, context)?;
         context.check()?;
         snapshot.project_root = prepared.root;
         snapshot.project_options = prepared.options.to_open_options();
+        let refresh = if snapshot.cards.is_empty() {
+            Vec::new()
+        } else {
+            let refresh =
+                crate::reload::refresh_sources(prepared.session.as_mut(), &snapshot.cards, context);
+            prepared.session.finish_operation(context);
+            refresh?
+        };
+        let refreshed = !refresh.is_empty();
+        if refreshed {
+            let patch = plan_edit(
+                &snapshot,
+                &prepared.crates,
+                &PreparedEdit::Reload { cards: refresh },
+                context,
+            )?;
+            snapshot.cards = patch.cards;
+            snapshot.connections = patch.connections;
+        }
         snapshot.regions = Arc::new(build_regions(
             &snapshot
                 .cards
@@ -193,6 +212,7 @@ impl WorkerExecutor {
             files,
             protection,
             listing_failed,
+            refreshed,
         })
     }
 }
@@ -361,14 +381,20 @@ fn optional<T: Default>(feature: FeatureResult<T>) -> T {
         FeatureResult::Unsupported => T::default(),
     }
 }
-fn acquire(
+pub(crate) fn acquire(
     session: &mut dyn AnalysisSession,
     symbol: &Symbol,
     context: &OperationContext,
 ) -> Result<CardSource> {
     symbol.validate()?;
     context.check()?;
-    CardSource::try_from(session.source(symbol, context)?)
+    let source = CardSource::try_from(session.source(symbol, context)?)?;
+    Ok(
+        match session.document_fingerprint(&source.symbol.path, context)? {
+            Some(fingerprint) => source.with_document_fingerprint(fingerprint),
+            None => source,
+        },
+    )
 }
 fn run_query(
     session: &mut dyn AnalysisSession,
@@ -376,6 +402,17 @@ fn run_query(
     context: &OperationContext,
 ) -> Result<AnalysisReply> {
     match query {
+        AnalysisQuery::RefreshSources(cards) => {
+            let cards = crate::reload::refresh_sources(session, &cards, context)?;
+            Ok(if cards.is_empty() {
+                AnalysisReply::Unchanged
+            } else {
+                AnalysisReply::Edit {
+                    edit: PreparedEdit::Reload { cards },
+                    symbols: None,
+                }
+            })
+        }
         AnalysisQuery::Files => Ok(AnalysisReply::Files(session.files(context)?)),
         AnalysisQuery::Symbols(path) => {
             Ok(AnalysisReply::Symbols(session.symbols(&path, context)?))

@@ -69,7 +69,7 @@ impl ApplicationController {
                             project: context.project,
                             ..Default::default()
                         };
-                        self.revision = 0;
+                        self.revision = u64::from(project.refreshed);
                         self.saved_revision = 0;
                         self.presentation = PresentationRevision::default();
                         self.undo = None;
@@ -128,6 +128,7 @@ impl ApplicationController {
                     return t;
                 }
                 match result {
+                    Ok(AnalysisReply::Unchanged) => {}
                     Ok(AnalysisReply::Files(files)) => {
                         t.events.push(ViewEvent::Files(files));
                         self.ready(&mut t);
@@ -144,6 +145,9 @@ impl ApplicationController {
                             t.events.push(ViewEvent::Symbols(symbols));
                         }
                         if self.dragging {
+                            if record.class == JobClass::Reload && self.pending_plan.is_some() {
+                                return t;
+                            }
                             self.pending_plan = Some((edit, record.class));
                         } else {
                             self.plan(edit, record.class, &mut t);
@@ -201,7 +205,13 @@ impl ApplicationController {
                 if context.project != self.basis.project || context.cancel.is_cancelled() {
                     return t;
                 }
+                if record.class == JobClass::Reload && basis.content != self.basis.content {
+                    return t;
+                }
                 if self.dragging {
+                    if record.class == JobClass::Reload && self.pending_plan.is_some() {
+                        return t;
+                    }
                     self.pending_plan = Some((edit, record.class));
                     return t;
                 }
@@ -239,8 +249,14 @@ impl ApplicationController {
                             self.revision += 1;
                             self.undo = None;
                         }
-                        if patch.topology {
+                        if patch.topology || patch.content {
                             self.canvas = CanvasStore::index(&self.snapshot);
+                        }
+                        if record.class == JobClass::Reload && (patch.geometry || patch.topology) {
+                            self.cancel(JobClass::Hover, &mut t);
+                            self.cancel(JobClass::Inspection, &mut t);
+                            t.events.push(ViewEvent::ClearInspection);
+                            t.events.push(ViewEvent::SourceReloaded);
                         }
                         if patch.invalidate_undo {
                             self.undo = None;

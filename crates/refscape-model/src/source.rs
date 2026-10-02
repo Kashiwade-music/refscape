@@ -9,7 +9,7 @@ use crate::{
     CardMetrics, ErrorKind, FoldId, FoldRevision, RefscapeError, SnapshotId, SourceLineNumber,
     SourceRevision,
 };
-pub use index::{DocumentSnapshot, TextIndex};
+pub use index::{DocumentFingerprint, DocumentSnapshot, TextIndex};
 pub use projection::{ProjectionRow, SourceProjection};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -60,6 +60,7 @@ pub struct CardSourceSnapshot {
     pub tokens: Arc<Vec<SemanticToken>>,
     pub gaps: Vec<Option<SourceGap>>,
     pub revision: SourceRevision,
+    pub document_fingerprint: Option<DocumentFingerprint>,
     body_line_count: usize,
     segments: Vec<Arc<str>>,
     gutter_width: f32,
@@ -79,6 +80,7 @@ impl PartialEq for CardSource {
                 && self.snapshot.context == other.snapshot.context
                 && self.snapshot.code_start == other.snapshot.code_start
                 && self.snapshot.tokens == other.snapshot.tokens
+                && self.snapshot.document_fingerprint == other.snapshot.document_fingerprint
                 && self.snapshot.gaps == other.snapshot.gaps))
             && self.folds.expanded == other.folds.expanded
     }
@@ -183,6 +185,7 @@ impl TryFrom<SourceDocument> for CardSource {
             tokens,
             gaps,
             revision,
+            document_fingerprint: None,
             body_line_count,
             segments,
             gutter_width,
@@ -196,6 +199,10 @@ impl TryFrom<SourceDocument> for CardSource {
     }
 }
 impl CardSource {
+    pub fn with_document_fingerprint(mut self, fingerprint: DocumentFingerprint) -> Self {
+        Arc::make_mut(&mut self.snapshot).document_fingerprint = Some(fingerprint);
+        self
+    }
     /// Body-only count used by the established summary label, independent of folds.
     pub fn body_line_count(&self) -> usize {
         self.snapshot.body_line_count

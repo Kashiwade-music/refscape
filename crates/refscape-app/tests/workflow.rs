@@ -19,12 +19,16 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            env::temp_dir().join(format!("refscape-workflow-{}-{unique}", std::process::id()));
+        let root = env::temp_dir().join(format!(
+            "refscape-workflow-{}-{unique}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(
             root.join("Cargo.toml"),
@@ -248,5 +252,57 @@ fn real_project_navigation_and_named_session_restore() {
             .any(|symbol| symbol.name == "answer")
     );
     // Stop the server before Fixture removes its project and target directory.
+    drop(explorer);
+}
+#[test]
+#[ignore = "requires rust-analyzer; run cargo test -p refscape-app --test workflow -- --ignored"]
+fn real_source_reload_and_changed_session_restore_keep_card_geometry() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("src/helper.rs");
+    let mut explorer = Workflow::new(LanguageBackend::default(), JsonSessionRepository);
+    explorer
+        .open_project(&fixture.root, &ProjectOpenOptions::default())
+        .unwrap();
+    let answer = explorer
+        .symbols(&path)
+        .unwrap()
+        .into_iter()
+        .find(|symbol| symbol.name == "answer")
+        .unwrap();
+    let id = explorer
+        .add_symbol(answer, Point::new(120.0, 350.0))
+        .unwrap();
+    explorer.zoom(1.5, Point::new(400.0, 200.0)).unwrap();
+    explorer.pan(Point::new(75.0, -30.0)).unwrap();
+    let before = explorer.session().clone();
+    let named = fixture.root.join("saved/session.json");
+    explorer.save_session(&named).unwrap();
+    fs::write(
+        &path,
+        "// moved declaration\n\npub fn answer() -> u32 {\n    43\n}\n",
+    )
+    .unwrap();
+    explorer.refresh_sources().unwrap();
+    let current = explorer
+        .session()
+        .cards
+        .iter()
+        .find(|card| card.id == id)
+        .unwrap();
+    assert!(current.source.code.contains("43"));
+    assert_eq!(current.source.symbol.range.start.line, 2);
+    assert_eq!(current.position, before.cards[0].position);
+    assert_eq!(explorer.session().viewport, before.viewport);
+    // Reopening the old saved bytes must still acquire the latest disk source.
+    explorer.load_session(&named).unwrap();
+    let current = explorer
+        .session()
+        .cards
+        .iter()
+        .find(|card| card.id == id)
+        .unwrap();
+    assert!(current.source.code.contains("43"));
+    assert_eq!(current.position, before.cards[0].position);
+    assert_eq!(explorer.session().viewport, before.viewport);
     drop(explorer);
 }

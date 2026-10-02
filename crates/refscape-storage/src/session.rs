@@ -45,10 +45,16 @@ fn import(document: v1::SessionDocument) -> Result<ImportedSession, RefscapeErro
         .cards
         .into_iter()
         .map(|card| {
+            let fingerprint = card.source.document_fingerprint;
             let source: SourceDocument = card.source.into();
+            let source = CardSource::try_from(source)?;
+            let source = match fingerprint {
+                Some(fingerprint) => source.with_document_fingerprint(fingerprint.into()),
+                None => source,
+            };
             Ok(CodeCard {
                 id: CardId::new(card.id)?,
-                source: CardSource::try_from(source)?,
+                source,
                 position: refscape_model::Point::from(card.position).try_into()?,
                 width: card.width,
                 height: card.height,

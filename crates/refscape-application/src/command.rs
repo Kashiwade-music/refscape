@@ -79,6 +79,7 @@ pub enum Command {
     SetViewport(Viewport),
     SetTheme(Theme),
     Files,
+    RefreshSources,
     Symbols(PathBuf),
     Search(String),
     Hover {

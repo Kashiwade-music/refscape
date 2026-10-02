@@ -250,6 +250,34 @@ fn session_roundtrip_preserves_canvas_code_connections_and_theme() {
     assert_eq!(load(&path).unwrap(), session);
 }
 #[test]
+fn document_fingerprints_roundtrip_without_changing_v1_or_legacy_defaults() {
+    let directory = TestDirectory::new();
+    let path = directory.path("fingerprint.json");
+    let mut session = fixture(&directory);
+    let fingerprint =
+        refscape_model::DocumentFingerprint::of("日本語😀\r\nactual full file".as_bytes());
+    let card = &mut Arc::make_mut(&mut session.cards)[0];
+    card.source = card.source.clone().with_document_fingerprint(fingerprint);
+    save(&path, &session).unwrap();
+    assert_eq!(load(&path).unwrap(), session);
+    let mut json = document(&session);
+    assert_eq!(json["version"], 1);
+    assert_eq!(
+        json["cards"][0]["source"]["document_fingerprint"]["hash"],
+        fingerprint.hash
+    );
+    json["cards"][0]["source"]
+        .as_object_mut()
+        .unwrap()
+        .remove("document_fingerprint");
+    let legacy = session::decode_v1(&serde_json::to_vec(&json).unwrap()).unwrap();
+    assert_eq!(legacy.snapshot.cards[0].source.document_fingerprint, None);
+    assert_eq!(
+        legacy.snapshot.cards[0].source.code,
+        session.cards[0].source.code
+    );
+}
+#[test]
 fn invalid_session_does_not_overwrite_last_valid_session() {
     let directory = TestDirectory::new();
     let path = directory.path("session.json");

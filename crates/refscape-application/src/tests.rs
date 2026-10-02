@@ -28,6 +28,8 @@ struct FakeState {
     crates: Vec<ProjectCrate>,
     metadata: Option<AnalysisMetadata>,
     finished_operations: usize,
+    fingerprints: HashMap<PathBuf, DocumentFingerprint>,
+    local_sources: bool,
 }
 #[derive(Clone)]
 struct Factory(Arc<Mutex<FakeState>>);
@@ -75,6 +77,16 @@ struct Backend {
     options: ResolvedProjectOptions,
 }
 impl AnalysisSession for Backend {
+    fn supports_source_reload(&self) -> bool {
+        self.state.lock().unwrap().local_sources
+    }
+    fn document_fingerprint(
+        &mut self,
+        path: &Path,
+        _: &OperationContext,
+    ) -> AnalysisResult<Option<DocumentFingerprint>> {
+        Ok(self.state.lock().unwrap().fingerprints.get(path).copied())
+    }
     fn metadata_snapshot(&self) -> Option<AnalysisMetadata> {
         self.state.lock().unwrap().metadata.clone()
     }
@@ -382,3 +394,4 @@ mod concurrency;
 mod layout;
 mod lifecycle;
 mod navigation;
+mod reload;

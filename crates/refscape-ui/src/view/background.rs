@@ -10,6 +10,12 @@ impl ExplorerView {
     pub(super) fn transition(&mut self, transition: Transition, cx: &mut Context<Self>) {
         for event in transition.events {
             match event {
+                ViewEvent::SourceReloaded => {
+                    self.clear_hover(cx);
+                    self.canvas.inspection = None;
+                    self.canvas.painted.clear();
+                    self.reconcile_canvas_selection();
+                }
                 ViewEvent::Reset => {
                     self.project.launch_options = Default::default();
                     self.canvas = CanvasState::default();

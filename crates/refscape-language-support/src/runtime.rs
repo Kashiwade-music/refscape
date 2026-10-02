@@ -185,6 +185,13 @@ pub fn collect_matches(symbols: &[Symbol], query: &str, output: &mut Vec<Symbol>
     }
 }
 impl AnalysisSession for LspAnalysisSession {
+    fn document_fingerprint(
+        &mut self,
+        path: &Path,
+        context: &OperationContext,
+    ) -> AnalysisResult<Option<refscape_model::DocumentFingerprint>> {
+        self.lsp.document_fingerprint(path, context).map(Some)
+    }
     fn dispose(self: Box<Self>, context: &OperationContext) -> AnalysisResult<()> {
         let disposal = self.lsp.disposal();
         drop(self);

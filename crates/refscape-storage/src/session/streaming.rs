@@ -64,7 +64,10 @@ struct SourceView<'a>(&'a CardSource);
 impl Serialize for SourceView<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let v = self.0;
-        let mut s = serializer.serialize_struct("SourceDocument", 7)?;
+        let mut s = serializer.serialize_struct(
+            "SourceDocument",
+            7 + usize::from(v.document_fingerprint.is_some()),
+        )?;
         s.serialize_field("symbol", &SymbolView(&v.symbol))?;
         s.serialize_field("code", v.code.as_ref())?;
         s.serialize_field("tokens", &Tokens(&v.tokens))?;
@@ -72,6 +75,12 @@ impl Serialize for SourceView<'_> {
         s.serialize_field("code_start", &v.code_start.map(v1::Position::from))?;
         s.serialize_field("folded", &GapViews(v.export_folded()))?;
         s.serialize_field("expanded", &GapViews(v.export_expanded()))?;
+        if let Some(fingerprint) = &v.document_fingerprint {
+            s.serialize_field(
+                "document_fingerprint",
+                &v1::DocumentFingerprint::from(fingerprint),
+            )?;
+        }
         s.end()
     }
 }

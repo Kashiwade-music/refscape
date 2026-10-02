@@ -31,6 +31,7 @@ pub enum ProjectRequest {
 
 #[derive(Clone)]
 pub enum AnalysisQuery {
+    RefreshSources(Arc<Vec<refscape_model::CodeCard>>),
     Files,
     Symbols(PathBuf),
     Search(String),
@@ -65,6 +66,7 @@ pub enum AnalysisQuery {
 }
 
 pub enum AnalysisReply {
+    Unchanged,
     Files(Vec<PathBuf>),
     Symbols(Vec<Symbol>),
     Search(Vec<Symbol>),
@@ -93,6 +95,7 @@ pub struct PreparedApplicationProject {
     pub files: Vec<PathBuf>,
     pub protection: Option<String>,
     pub listing_failed: bool,
+    pub refreshed: bool,
 }
 
 pub enum Effect {

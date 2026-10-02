@@ -60,6 +60,7 @@ fields!(Palette {
     syntax_function
 });
 fields!(Theme { name, palette });
+fields!(DocumentFingerprint { byte_len, hash });
 
 macro_rules! owned_export {
     ($($name:ident),* $(,)?) => {$(
@@ -150,6 +151,7 @@ impl From<&model::SourceDocument> for v1::SourceDocument {
             code_start: value.code_start.map(Into::into),
             folded: value.folded.iter().map(Into::into).collect(),
             expanded: value.expanded.iter().map(Into::into).collect(),
+            document_fingerprint: None,
         }
     }
 }

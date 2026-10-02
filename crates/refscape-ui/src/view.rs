@@ -7,6 +7,7 @@ mod layout;
 mod navigation;
 mod painting;
 mod project;
+mod reload;
 mod render;
 mod scene;
 mod shaping;
@@ -40,6 +41,7 @@ pub(crate) struct ExplorerView {
     sidebar: sidebar::SidebarCache,
     scene: std::rc::Rc<std::cell::RefCell<scene::SceneCache>>,
     close_ready: bool,
+    _reload_task: Option<gpui::Task<()>>,
 }
 struct ProjectPresenter {
     session_path: PathBuf,
@@ -138,6 +140,7 @@ impl ExplorerView {
             sidebar: Default::default(),
             scene: Default::default(),
             close_ready: false,
+            _reload_task: None,
         };
         cx.observe_window_activation(window, |view, window, cx| {
             if !window.is_window_active() {
@@ -162,6 +165,7 @@ impl ExplorerView {
         {
             view.command(Command::Files, cx);
         }
+        view.watch_sources(cx);
         view
     }
 }
